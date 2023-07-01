@@ -1,0 +1,67 @@
+* qemu patches
+
+emulate some hardware use for run firmware.
+
+** support
+
+aw is allwiner
+mt is mediatek
+
+|                | mt7628 | aw-f1c100s | aw-d1 | aw-v85x |
+|----------------+--------+------------+-------+---------|
+| INTC           | v      |            |       |         |
+| TIMER          |        |            |       |         |
+| UART           | v      |            |       |         |
+| GPIO           |        |            |       |         |
+| SPI            | v      |            |       |         |
+| MMC            |        |            |       |         |
+| I2C            |        |            |       |         |
+| USB            | v      |            |       |         |
+| SATA           | x      | x          | x     | x       |
+| PCIE           |        | x          | x     | x       |
+| ETHERNET       | v      | x          |       |         |
+| DISPLAY        | x      |            |       |         |
+| AUDIO          |        |            |       |         |
+| BROM           | x      |            |       |         |
+|----------------+--------+------------+-------+---------|
+| BOOT FROM SPI  | v      |            |       |         |
+| BOOT FROM MMC  | x      |            |       |         |
+| BOOT FROM UART | x      | x          |       |         |
+| SPL            | v      |            |       |         |
+| LINUX          | v      |            |       |         |
+| UBOOT          | v      |            |       |         |
+| NETBSD         |        |            |       |         |
+| 9FRONT         |        |            |       |         |
+
+** build
+
+#+BEGIN_SRC shell
+  git clone https://gitlab.com/qemu-project/qemu /path/to/qemu
+  git clone https://github.com/newluhux/qemu-hui/
+  cd qemu
+  for i in ../qemu-hui/*.patch
+  do
+      git am $i
+  done
+#+END_SRC
+
+#+BEGIN_SRC shell
+ cd /path/to/qemu/
+ ./configure --target-list=arm-softmmu,mipsel-softmmu,riscv64-softmmu
+ make -j$(nproc)
+ make check
+#+END_SRC
+
+** mt7628
+
+#+BEGIN_SRC shell
+  ./build/qemu-system-mipsel \
+      -M mt7628_evb \
+      -nographic \
+      -object filter-dump,id=f1,netdev=hub0port0,file=mt7628net.pcap \
+      -drive if=mtd,file=./flash.bin,format=raw
+#+END_SRC
+
+* license
+
+same with qemu

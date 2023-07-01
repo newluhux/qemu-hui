@@ -1,0 +1,265 @@
+From fcc04ca8285cfc54d6c25404adf1dd02cb78b4a0 Mon Sep 17 00:00:00 2001
+From: Lu Hui <luhux76@gmail.com>
+Date: Sat, 1 Jul 2023 14:00:43 +0800
+Subject: [PATCH 4/7] hw: intc: add rt2880-intc
+
+---
+ hw/intc/Kconfig               |   3 +
+ hw/intc/meson.build           |   1 +
+ hw/intc/rt2880-intc.c         | 177 ++++++++++++++++++++++++++++++++++
+ include/hw/intc/rt2880-intc.h |  39 ++++++++
+ 4 files changed, 220 insertions(+)
+ create mode 100644 hw/intc/rt2880-intc.c
+ create mode 100644 include/hw/intc/rt2880-intc.h
+
+diff --git a/hw/intc/Kconfig b/hw/intc/Kconfig
+index 21441d0a0c..7b20a9f618 100644
+--- a/hw/intc/Kconfig
++++ b/hw/intc/Kconfig
+@@ -105,3 +105,6 @@ config LOONGARCH_PCH_MSI
+ 
+ config LOONGARCH_EXTIOI
+     bool
++
++config RT2880_INTC
++    bool
+diff --git a/hw/intc/meson.build b/hw/intc/meson.build
+index ed355941d1..a687242a57 100644
+--- a/hw/intc/meson.build
++++ b/hw/intc/meson.build
+@@ -73,3 +73,4 @@ specific_ss.add(when: 'CONFIG_LOONGARCH_IPI', if_true: files('loongarch_ipi.c'))
+ specific_ss.add(when: 'CONFIG_LOONGARCH_PCH_PIC', if_true: files('loongarch_pch_pic.c'))
+ specific_ss.add(when: 'CONFIG_LOONGARCH_PCH_MSI', if_true: files('loongarch_pch_msi.c'))
+ specific_ss.add(when: 'CONFIG_LOONGARCH_EXTIOI', if_true: files('loongarch_extioi.c'))
++specific_ss.add(when: 'CONFIG_RT2880_INTC', if_true: files('rt2880-intc.c'))
+diff --git a/hw/intc/rt2880-intc.c b/hw/intc/rt2880-intc.c
+new file mode 100644
+index 0000000000..8b53390ccc
+--- /dev/null
++++ b/hw/intc/rt2880-intc.c
+@@ -0,0 +1,177 @@
++/*
++ * rt2880 interrupt controller device emulation
++ *
++ * Copyright (C) 2023 Lu Hui
++ * Written by Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ * for more details.
++ */
++
++#include "qemu/osdep.h"
++#include "hw/sysbus.h"
++#include "migration/vmstate.h"
++#include "hw/intc/rt2880-intc.h"
++#include "hw/irq.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++
++static void rt2880_intc_reset(DeviceState *d)
++{
++    rt2880intcState *s = RT2880_INTC(d);
++
++    s->type    = 0x0;
++    s->enable  = 0x0;
++    s->disable = 0x0;
++}
++
++static void rt2880_intc_reset_line_handler(void *opaque, int irq, int level)
++{
++    rt2880intcState *s = opaque;
++    if (level) {
++        s->reset_asserted = true;
++        rt2880_intc_reset(DEVICE(opaque));
++    } else {
++        s->reset_asserted = false;
++    }
++}
++
++static inline int rt2880_intc_check_reset_line(rt2880intcState *s)
++{
++    return !(s->reset_asserted);
++}
++
++static void rt2880_intc_update(rt2880intcState *s)
++{
++    if (!rt2880_intc_check_reset_line(s)) {
++        return;
++    }
++    int i;
++    for (i = 0; i < 32; i++) {
++        if (test_bit(i, (void *) &s->disable)) {
++            clear_bit(i, (void *) &s->enable);
++        }
++    }
++    qemu_set_irq(s->parent_irq, !!(s->enable));
++}
++
++static void rt2880_intc_set_irq(void *opaque, int irq, int level)
++{
++    rt2880intcState *s = opaque;
++
++    if (level) {
++        set_bit(irq, (void *) &s->enable);
++        clear_bit(irq, (void *) &s->disable);
++    } else {
++        clear_bit(irq, (void *) &s->enable);
++        set_bit(irq, (void *) &s->disable);
++    }
++    rt2880_intc_update(s);
++}
++
++static uint64_t rt2880_intc_read(void *opaque, hwaddr offset,
++                                 unsigned size)
++{
++    rt2880intcState *s = opaque;
++    if (!rt2880_intc_check_reset_line(s)) {
++        return 0x0;
++    }
++
++    switch (offset) {
++    case RT2880_INTC_REG_STATUS0:
++        return s->enable;
++    case RT2880_INTC_REG_TYPE:
++        return s->type;
++    case RT2880_INTC_REG_ENABLE:
++        return s->enable;
++    case RT2880_INTC_REG_DISABLE:
++        return s->disable;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "%s: not imp offset 0x%x\n", __func__, (int) offset);
++        return 0x0;
++        break;
++    }
++
++    return 0;
++}
++
++static void rt2880_intc_write(void *opaque, hwaddr offset, uint64_t value,
++                              unsigned size)
++{
++    rt2880intcState *s = opaque;
++    if (!rt2880_intc_check_reset_line(s)) {
++        return;
++    }
++
++
++    switch (offset) {
++    case RT2880_INTC_REG_TYPE:
++        s->type = value;
++        break;
++    case RT2880_INTC_REG_ENABLE:
++        s->enable = value;
++        break;
++    case RT2880_INTC_REG_DISABLE:
++        s->disable = value;
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "%s: not imp offset 0x%x\n", __func__, (int) offset);
++        break;
++    }
++
++    rt2880_intc_update(s);
++}
++
++static const MemoryRegionOps rt2880_intc_ops = {
++    .read = rt2880_intc_read,
++    .write = rt2880_intc_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void rt2880_intc_init(Object *obj)
++{
++    rt2880intcState *s = RT2880_INTC(obj);
++    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
++
++    qdev_init_gpio_in(DEVICE(dev), rt2880_intc_set_irq, 32);
++    qdev_init_gpio_in(DEVICE(dev), rt2880_intc_reset_line_handler, 1);
++    sysbus_init_irq(dev, &s->parent_irq);
++    sysbus_init_irq(dev, &s->reset_line);
++    memory_region_init_io(&s->iomem, OBJECT(s), &rt2880_intc_ops, s,
++                          TYPE_RT2880_INTC, RT2880_INTC_REGS_MAXADDR);
++    sysbus_init_mmio(dev, &s->iomem);
++    s->reset_asserted = false; /* default on */
++}
++
++static void rt2880_intc_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->reset = rt2880_intc_reset;
++    dc->desc = "rt2880 interrupt control";
++}
++
++static const TypeInfo rt2880_intc_info = {
++    .name = TYPE_RT2880_INTC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(rt2880intcState),
++    .instance_init = rt2880_intc_init,
++    .class_init = rt2880_intc_class_init,
++};
++
++static void rt2880_register_types(void)
++{
++    type_register_static(&rt2880_intc_info);
++}
++
++type_init(rt2880_register_types);
+diff --git a/include/hw/intc/rt2880-intc.h b/include/hw/intc/rt2880-intc.h
+new file mode 100644
+index 0000000000..7de7fb5404
+--- /dev/null
++++ b/include/hw/intc/rt2880-intc.h
+@@ -0,0 +1,39 @@
++#ifndef RT2880_INTC_H
++#define RT2880_INTC_H
++
++/*
++ * some code from linux kernel:
++ * arch/mips/ralink/irq.c
++ * Copyright (C) 2009 Gabor Juhos <juhosg@openwrt.org>
++ * Copyright (C) 2013 John Crispin <john@phrozen.org>
++ */
++
++#include "hw/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_RT2880_INTC  "rt2880-intc"
++OBJECT_DECLARE_SIMPLE_TYPE(rt2880intcState, RT2880_INTC)
++
++#define RT2880_INTC_REG_STATUS0     (0x9c)
++#define RT2880_INTC_REG_TYPE        (0x6c)
++#define RT2880_INTC_REG_ENABLE      (0x80)
++#define RT2880_INTC_REG_DISABLE     (0x78)
++
++#define RT2880_INTC_REGS_MAXADDR (0xFF)
++
++struct rt2880intcState {
++    /*< private >*/
++    SysBusDevice parent_obj;
++    /*< public >*/
++    MemoryRegion iomem;
++    qemu_irq parent_irq;
++    qemu_irq reset_line;
++
++    bool reset_asserted;
++
++    uint32_t type;
++    uint32_t enable;
++    uint32_t disable;
++};
++
++#endif
+-- 
+2.35.8
+

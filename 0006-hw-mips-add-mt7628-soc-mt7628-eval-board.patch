@@ -1,0 +1,506 @@
+From d70bbf6d0967beda3e8d73ffbb9b2bd052bd7c1c Mon Sep 17 00:00:00 2001
+From: Lu Hui <luhux76@gmail.com>
+Date: Sat, 1 Jul 2023 14:01:52 +0800
+Subject: [PATCH 6/7] hw: mips: add mt7628 soc & mt7628 eval board
+
+---
+ hw/mips/Kconfig          |  17 ++++
+ hw/mips/meson.build      |   2 +
+ hw/mips/mt7628.c         | 185 +++++++++++++++++++++++++++++++++++++++
+ hw/mips/mt7628_evb.c     | 157 +++++++++++++++++++++++++++++++++
+ include/hw/mips/mt7628.h |  89 +++++++++++++++++++
+ 5 files changed, 450 insertions(+)
+ create mode 100644 hw/mips/mt7628.c
+ create mode 100644 hw/mips/mt7628_evb.c
+ create mode 100644 include/hw/mips/mt7628.h
+
+diff --git a/hw/mips/Kconfig b/hw/mips/Kconfig
+index da3a37e215..5c0dcd929c 100644
+--- a/hw/mips/Kconfig
++++ b/hw/mips/Kconfig
+@@ -61,3 +61,20 @@ config MIPS_BOSTON
+ 
+ config FW_CFG_MIPS
+     bool
++
++config MIPS_MT7628
++    bool
++    select MT7620_SYSCTRL
++    select RT2880_INTC
++    select SERIAL
++    select MT7621_SPI
++    select MT7628_ETH
++    select USB_EHCI
++    select USB_EHCI_SYSBUS
++    select USB_OHCI
++    select UNIMP
++
++config MIPS_MT7628_EVB
++    bool
++    select MIPS_MT7628
++    select SSI_M25P80
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index 900613fc08..d9bb49a0ca 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -10,6 +10,8 @@ mips_ss.add(when: 'CONFIG_JAZZ', if_true: files('jazz.c'))
+ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: [files('boston.c'), fdt])
++mips_ss.add(when: 'CONFIG_MIPS_MT7628', if_true: files('mt7628.c'))
++mips_ss.add(when: 'CONFIG_MIPS_MT7628_EVB', if_true: files('mt7628_evb.c'))
+ endif
+ 
+ hw_arch += {'mips': mips_ss}
+diff --git a/hw/mips/mt7628.c b/hw/mips/mt7628.c
+new file mode 100644
+index 0000000000..be2f4b9f80
+--- /dev/null
++++ b/hw/mips/mt7628.c
+@@ -0,0 +1,185 @@
++/*
++ * Mediatek 7628 System on Chip emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/error-report.h"
++#include "qemu/module.h"
++#include "qemu/units.h"
++#include "hw/qdev-core.h"
++#include "hw/qdev-properties.h"
++#include "hw/sysbus.h"
++#include "sysemu/sysemu.h"
++#include "hw/mips/mips.h"
++#include "hw/mips/cpudevs.h"
++#include "hw/mips/mt7628.h"
++#include "hw/misc/unimp.h"
++
++/* Memory map */
++hwaddr mt7628_memmap[] = {
++    [MT7628_DEV_SDRAM]   = 0x00000000,
++    [MT7628_DEV_SYSCTRL] = 0x10000000,
++    [MT7628_DEV_INTC]    = 0x10000200,
++    [MT7628_DEV_SPI_M]   = 0x10000B00,
++    [MT7628_DEV_UART0]   = 0x10000C00,
++    [MT7628_DEV_UART1]   = 0x10000D00,
++    [MT7628_DEV_UART2]   = 0x10000E00,
++    [MT7628_DEV_FE]      = 0x10100000,
++    [MT7628_DEV_ESW]     = 0x10110000,
++    [MT7628_DEV_EHCI]    = 0x101C0000,
++    [MT7628_DEV_OHCI]    = 0x101C1000,
++    [MT7628_DEV_FLASH]   = 0x1C000000,
++};
++
++struct {
++    const char *device_name;
++    hwaddr base;
++    hwaddr size;
++} mt7628_unimp[] = {
++{ "timer",        0x10000100, 0xFF },
++{ "memc",         0x10000300, 0xFF },
++{ "rbus",         0x10000400, 0xFF },
++{ "mips-cnt",     0x10000500, 0xFF },
++{ "gpio",         0x10000600, 0xFF },
++{ "spi-slave",    0x10000700, 0xFF },
++{ "i2c",          0x10000900, 0xFF },
++{ "i2s",          0x10000A00, 0xFF },
++{ "hsuart0",      0x10000C20, 0xe0 },
++{ "hsuart1",      0x10000D20, 0xe0 },
++{ "hsuart2",      0x10000E20, 0xe0 },
++{ "rgctl",        0x10001000, 2 * KiB },
++{ "pcm",          0x10002000, 2 * KiB },
++{ "dma",          0x10002800, 2 * KiB },
++{ "aes",          0x10004000, 4 * KiB },
++{ "pwm",          0x10005000, 4 * KiB },
++{ "usb-phy",      0x10120000, 32 * KiB },
++{ "sdxc",         0x10130000, 32 * KiB },
++{ "pcie",         0x10140000, 256 * KiB },
++{ "wlan",         0x10300000, 1 * MiB },
++{ "pcie-direct",  0x20000000, 256 * MiB },
++};
++
++static void mt7628_init(Object *obj)
++{
++    mt7628State *s = MT7628(obj);
++    int i;
++
++    s->memmap = mt7628_memmap;
++    object_initialize_child(obj, "sysctrl", &s->sysctrl, TYPE_MT7620_SYSCTRL);
++    object_initialize_child(obj, "intc", &s->intc, TYPE_RT2880_INTC);
++    for (i = 0; i < MT7628_UART_NUMS; i++) {
++        object_initialize_child(obj, "uart[*]", &s->uart[i], TYPE_SERIAL_MM);
++    }
++    object_initialize_child(obj, "eth", &s->eth, TYPE_MT7628_ETH);
++    object_initialize_child(obj, "ehci", &s->ehci, TYPE_PLATFORM_EHCI);
++    object_initialize_child(obj, "ohci", &s->ohci, TYPE_SYSBUS_OHCI);
++    object_initialize_child(obj, "spi_m", &s->spi_m, TYPE_MT7621_SPI);
++}
++
++static void mt7628_realize(DeviceState *dev, Error **errp)
++{
++    mt7628State *s = MT7628(dev);
++    int i;
++    Clock *cpuclk;
++
++    cpuclk = clock_new(OBJECT(dev), "cpu-refclk");
++    clock_set_hz(cpuclk, 580000000);
++    s->cpu = mips_cpu_create_with_clock(MIPS_CPU_TYPE_NAME("24KEc"),
++                                        cpuclk);
++    /* Init CPU internal devices. */
++    cpu_mips_irq_init_cpu(s->cpu);
++    cpu_mips_clock_init(s->cpu);
++
++    sysbus_realize(SYS_BUS_DEVICE(&s->sysctrl), &error_abort);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysctrl), 0, s->memmap[MT7628_DEV_SYSCTRL]);
++    sysbus_realize(SYS_BUS_DEVICE(&s->intc), errp);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 1,
++                       s->sysctrl.reset_line[MT7628_RST_INTC]);
++    sysbus_realize(SYS_BUS_DEVICE(&s->spi_m), &error_abort);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0, s->memmap[MT7628_DEV_INTC]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0,
++                        s->cpu->env.irq[MT7628_CPU_IRQ_INTC]);
++    qdev_pass_gpios(DEVICE(&s->intc), dev, NULL);
++    for (i = 0; i < MT7628_UART_NUMS; i++) {
++        qdev_prop_set_chr(DEVICE(&s->uart[i]), "chardev", serial_hd(i));
++        qdev_prop_set_uint8(DEVICE(&s->uart[i]), "regshift", 2);
++        sysbus_realize(SYS_BUS_DEVICE(&s->uart[i]), &error_abort);
++        sysbus_connect_irq(SYS_BUS_DEVICE(&s->uart[i]), 0, qdev_get_gpio_in(dev, MT7628_IRQ_UART0 + i));
++        sysbus_mmio_map(SYS_BUS_DEVICE(&s->uart[i]), 0,
++                        s->memmap[MT7628_DEV_UART0 + i]);
++    }
++    if (nd_table[0].used) {
++        qemu_check_nic_model(&nd_table[0], TYPE_MT7628_ETH);
++        qdev_set_nic_properties(DEVICE(&s->eth), &nd_table[0]);
++    }
++    object_property_set_link(OBJECT(&s->eth), "dma-memory",
++                             OBJECT(get_system_memory()), &error_fatal);
++    sysbus_realize(SYS_BUS_DEVICE(&s->eth), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->eth), 0,
++                    s->memmap[MT7628_DEV_FE]);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->eth), 1,
++                    s->memmap[MT7628_DEV_ESW]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->eth), 0,
++                       s->cpu->env.irq[MT7628_CPU_IRQ_FE]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->eth), 1,
++                       qdev_get_gpio_in(dev, MT7628_IRQ_ESW));
++    sysbus_realize(SYS_BUS_DEVICE(&s->ehci), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ehci), 0,
++                    s->memmap[MT7628_DEV_EHCI]);
++    sysbus_realize(SYS_BUS_DEVICE(&s->ohci), &error_fatal);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->ehci), 0,
++                    qdev_get_gpio_in(dev, MT7628_IRQ_EHCI));
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ohci), 0,
++                    s->memmap[MT7628_DEV_OHCI]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->ohci), 0,
++                    qdev_get_gpio_in(dev, MT7628_IRQ_EHCI));
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi_m), 0, s->memmap[MT7628_DEV_SPI_M]);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi_m), 1, s->memmap[MT7628_DEV_FLASH]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->spi_m), 1, s->sysctrl.reset_line[MT7628_RST_SPI_M]);
++
++    /* unimplemented devices */
++    for (i = 0; i < ARRAY_SIZE(mt7628_unimp); i++) {
++        create_unimplemented_device(mt7628_unimp[i].device_name,
++                                    mt7628_unimp[i].base,
++                                    mt7628_unimp[i].size);
++    }
++}
++
++static void mt7628_class_init(ObjectClass *oc, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(oc);
++
++    dc->realize = mt7628_realize;
++    dc->user_creatable = false;
++}
++
++static const TypeInfo mt7628_type_info = {
++    .name = TYPE_MT7628,
++    .parent = TYPE_DEVICE,
++    .instance_size = sizeof(mt7628State),
++    .instance_init = mt7628_init,
++    .class_init = mt7628_class_init,
++};
++
++static void mt7628_register_types(void)
++{
++    type_register_static(&mt7628_type_info);
++}
++
++type_init(mt7628_register_types)
+diff --git a/hw/mips/mt7628_evb.c b/hw/mips/mt7628_evb.c
+new file mode 100644
+index 0000000000..868a6a7cb0
+--- /dev/null
++++ b/hw/mips/mt7628_evb.c
+@@ -0,0 +1,157 @@
++/*
++ * mt7628 evb emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "exec/address-spaces.h"
++#include "qapi/error.h"
++#include "qemu/error-report.h"
++#include "hw/mips/mips.h"
++#include "hw/boards.h"
++#include "hw/loader.h"
++#include "elf.h"
++#include "hw/qdev-properties.h"
++#include "hw/mips/mt7628.h"
++#include "hw/ssi/ssi.h"
++#include "hw/misc/unimp.h"
++#include "sysemu/reset.h"
++
++typedef struct ResetData {
++    MIPSCPU *cpu;
++    uint64_t vector;
++} ResetData;
++
++static void main_cpu_reset(void *opaque)
++{
++    ResetData *s = (ResetData *)opaque;
++    CPUMIPSState *env = &s->cpu->env;
++
++    cpu_reset(CPU(s->cpu));
++    env->active_tc.PC = s->vector & ~(target_ulong) 1;
++}
++
++static struct _loaderparams {
++    int ram_size;
++    const char *kernel_filename;
++    const char *kernel_cmdline;
++    const char *initrd_filename;
++} loaderparams;
++
++static uint64_t load_kernel(void)
++{
++    uint64_t entry, kernel_high, initrd_size;
++    long kernel_size;
++    ram_addr_t initrd_offset;
++    int big_endian;
++    big_endian = 0;
++
++    kernel_size = load_elf(loaderparams.kernel_filename, NULL,
++                           cpu_mips_kseg0_to_phys, NULL,
++                           &entry, NULL,
++                           &kernel_high, NULL, big_endian,
++                           EM_MIPS, 1, 0);
++    if (kernel_size < 0) {
++        error_report("could not load kernel '%s': %s",
++                     loaderparams.kernel_filename,
++                     load_elf_strerror(kernel_size));
++        exit(1);
++    }
++
++    /* load initrd */
++    initrd_size = 0;
++    initrd_offset = 0;
++    if (loaderparams.initrd_filename) {
++        initrd_size = get_image_size(loaderparams.initrd_filename);
++        if (initrd_size > 0) {
++            initrd_offset = ROUND_UP(kernel_high, INITRD_PAGE_SIZE);
++            if (initrd_offset + initrd_size > loaderparams.ram_size) {
++                error_report("memory too small for initial ram disk '%s'",
++                             loaderparams.initrd_filename);
++                exit(1);
++            }
++            initrd_size = load_image_targphys(loaderparams.initrd_filename,
++                                              initrd_offset, loaderparams.ram_size - initrd_offset);
++        }
++        if (initrd_size == (target_ulong) -1) {
++            error_report("could not load initial ram disk '%s'",
++                         loaderparams.initrd_filename);
++            exit(1);
++        }
++    }
++    return entry;
++}
++
++static void mt7628_evb_init(MachineState *machine)
++{
++    mt7628State *mt7628;
++    ResetData *reset_info;
++
++    mt7628 = MT7628(object_new(TYPE_MT7628));
++    object_property_add_child(OBJECT(machine), "soc", OBJECT(mt7628));
++    object_unref(OBJECT(mt7628));
++    qdev_realize(DEVICE(mt7628), NULL, &error_abort);
++
++    /* flash */
++    DriveInfo *dinfo;
++    dinfo = drive_get(IF_MTD, 0, 0);
++    DeviceState *spi_flash;
++    qemu_irq cs_line;
++    spi_flash = qdev_new("w25q128");
++    if (dinfo) {
++        qdev_prop_set_drive(spi_flash, "drive", blk_by_legacy_dinfo(dinfo));
++    }
++    qdev_realize_and_unref(spi_flash, BUS(mt7628->spi_m.spi), &error_fatal);
++    cs_line = qdev_get_gpio_in_named(spi_flash, SSI_GPIO_CS, 0);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&mt7628->spi_m), 0, cs_line);
++
++    /* DRAM */
++    mt7628->sdram = machine->ram;
++    memory_region_add_subregion(get_system_memory(),
++                                mt7628->memmap[MT7628_DEV_SDRAM], machine->ram);
++    if (machine->ram_size < 256 * MiB) { /* use for memory test */
++        create_unimplemented_device("ddr(no used)",
++                                    mt7628->memmap[MT7628_DEV_SDRAM] +
++                                    machine->ram_size,
++                                    (256 * MiB) - machine->ram_size);
++    }
++
++    reset_info = g_new0(ResetData, 1);
++    reset_info->cpu = mt7628->cpu;
++    if (machine->kernel_filename) {
++        loaderparams.ram_size = machine->ram_size;
++        loaderparams.kernel_filename = machine->kernel_filename;
++        loaderparams.kernel_cmdline = machine->kernel_cmdline;
++        loaderparams.initrd_filename = machine->initrd_filename;
++        reset_info->vector = load_kernel();
++    } else {
++        /* set PC to flash direct access */
++        reset_info->vector = mt7628->memmap[MT7628_DEV_FLASH] + 0x80000000;
++    }
++    qemu_register_reset(main_cpu_reset, reset_info);
++}
++
++static void mt7628_evb_machine_init(MachineClass *mc)
++{
++    mc->desc = "Mediatek 7628 Eval Board (mipsel 24KEc)";
++    mc->init = mt7628_evb_init;
++    mc->default_ram_size = 256 * MiB;
++    mc->default_ram_id = "mt7628_evb.ram";
++}
++
++DEFINE_MACHINE("mt7628_evb", mt7628_evb_machine_init)
+diff --git a/include/hw/mips/mt7628.h b/include/hw/mips/mt7628.h
+new file mode 100644
+index 0000000000..8b4c829e13
+--- /dev/null
++++ b/include/hw/mips/mt7628.h
+@@ -0,0 +1,89 @@
++/*
++ * Mediatek 7628 System on Chip emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef HW_MIPSEL_MT7628_H
++#define HW_MIPSEL_MT7628_H
++
++#include "qom/object.h"
++#include "hw/misc/mt7620-sysctrl.h"
++#include "hw/intc/rt2880-intc.h"
++#include "hw/char/serial.h"
++#include "hw/usb/hcd-ehci.h"
++#include "hw/usb/hcd-ohci.h"
++#include "hw/ssi/mt7621-spi.h"
++#include "hw/net/mt7628-eth.h"
++#include "target/mips/cpu.h"
++
++#define TYPE_MT7628 "mt7628"
++
++OBJECT_DECLARE_SIMPLE_TYPE(mt7628State, MT7628)
++
++enum {
++    MT7628_DEV_SDRAM,
++    MT7628_DEV_SYSCTRL,
++    MT7628_DEV_INTC,
++    MT7628_DEV_SPI_M,
++    MT7628_DEV_UART0,
++    MT7628_DEV_UART1,
++    MT7628_DEV_UART2,
++    MT7628_DEV_FE,
++    MT7628_DEV_ESW,
++    MT7628_DEV_EHCI,
++    MT7628_DEV_OHCI,
++    MT7628_DEV_FLASH,
++};
++
++enum {
++    MT7628_CPU_IRQ_INTC = 2,
++    MT7628_CPU_IRQ_FE = 5,
++};
++
++enum {
++    MT7628_IRQ_UART0 = 20,
++    MT7628_IRQ_UART1 = 21,
++    MT7628_IRQ_UART2 = 22,
++    MT7628_IRQ_ESW = 17,
++    MT7628_IRQ_EHCI = 18,
++};
++
++enum {
++    MT7628_RST_INTC = 9,
++    MT7628_RST_SPI_M = 18,
++};
++
++enum {
++    MT7628_UART_NUMS = 3,
++};
++
++struct mt7628State {
++    DeviceState parent_obj;
++
++    MIPSCPU *cpu;
++    hwaddr *memmap;
++    mt7620SysCtrlState sysctrl;
++    rt2880intcState intc;
++    SerialMM uart[MT7628_UART_NUMS];
++    EHCISysBusState ehci;
++    OHCISysBusState ohci;
++    mt7621SpiState spi_m;
++    mt7628EthState eth;
++    MemoryRegion *sdram;
++};
++
++#endif
+-- 
+2.35.8
+

@@ -1,0 +1,278 @@
+From a41b4d3139ecb3a787fc03e4eab3d21bdb13e1ea Mon Sep 17 00:00:00 2001
+From: Lu Hui <luhux76@gmail.com>
+Date: Sat, 1 Jul 2023 13:59:50 +0800
+Subject: [PATCH 1/7] hw: misc: add mt7620-sysctrl
+
+---
+ hw/misc/Kconfig                  |   3 +
+ hw/misc/meson.build              |   2 +
+ hw/misc/mt7620-sysctrl.c         | 166 +++++++++++++++++++++++++++++++
+ include/hw/misc/mt7620-sysctrl.h |  59 +++++++++++
+ 4 files changed, 230 insertions(+)
+ create mode 100644 hw/misc/mt7620-sysctrl.c
+ create mode 100644 include/hw/misc/mt7620-sysctrl.h
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index e4c2149175..1a0e157e6d 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -184,3 +184,6 @@ config AXP2XX_PMU
+     depends on I2C
+ 
+ source macio/Kconfig
++
++config MT7620_SYSCTRL
++    bool
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 05877f61cc..4696888688 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -131,6 +131,8 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
+ 
+ system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
+ 
++system_ss.add(when: 'CONFIG_MT7620_SYSCTRL', if_true: files('mt7620-sysctrl.c'))
++
+ system_ss.add(when: 'CONFIG_I2C', if_true: files('i2c-echo.c'))
+ 
+ specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
+diff --git a/hw/misc/mt7620-sysctrl.c b/hw/misc/mt7620-sysctrl.c
+new file mode 100644
+index 0000000000..f2b82acd08
+--- /dev/null
++++ b/hw/misc/mt7620-sysctrl.c
+@@ -0,0 +1,166 @@
++/*
++ * Mediatek 7620 System Control emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "hw/sysbus.h"
++#include "migration/vmstate.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "sysemu/runstate.h"
++#include "hw/resettable.h"
++#include "hw/misc/mt7620-sysctrl.h"
++#include "hw/irq.h"
++
++#define DEBUG_MT7620_SYSCTRL 1  
++
++#ifdef DEBUG_MT7620_SYSCTRL
++#define DPRINTF(fmt, ...) \
++    do { printf("mt7620-sysctrl: " fmt , ## __VA_ARGS__); } while (0)
++#else
++#define DPRINTF(fmt, ...) do {} while (0)
++#endif
++
++#define REG_INDEX(offset)   (offset / sizeof(uint32_t))
++
++static uint64_t mt7620_sysctrl_read(void *opaque, hwaddr offset,
++                                    unsigned size)
++{
++    mt7620SysCtrlState *s = MT7620_SYSCTRL(opaque);
++    if (offset >= MT7620_SYSCTRL_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
++                      __func__, (uint32_t)offset);
++        return 0x0;
++    }
++    return s->regs[REG_INDEX(offset)];
++}
++
++static void mt7620_sysctrl_reset_control(mt7620SysCtrlState *s)
++{
++    uint32_t *reg_rst = &s->regs[REG_INDEX(REG_RSTCTRL)];
++
++    if (test_bit(0, (void *)reg_rst)) {
++        DPRINTF("whole system reset\n");
++        *reg_rst &= ~(1 << 0);
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++    }
++
++    int i;
++    for (i = 1; i < 32; i++) {
++        if (qemu_irq_is_connected(s->reset_line[i])) {
++            if (test_bit(i, (void *)reg_rst)) {
++                DPRINTF("device %d enter reset state\n", i);
++                qemu_irq_raise(s->reset_line[i]);
++            } else {
++                DPRINTF("device %d quit reset state\n", i);
++                qemu_irq_lower(s->reset_line[i]);
++            }
++        }
++    }
++}
++
++static void mt7620_sysctrl_write(void *opaque, hwaddr offset,
++                                 uint64_t val, unsigned size)
++{
++    mt7620SysCtrlState *s = MT7620_SYSCTRL(opaque);
++
++    if (offset >= MT7620_SYSCTRL_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
++                      __func__, (uint32_t)offset);
++        return;
++    }
++
++    switch (offset) {
++    case REG_CHIPID0:
++    case REG_CHIPID4:
++    case REG_EECFG:
++    case REG_CHIPVER:
++    case REG_ROMSTAT:
++        break;
++    case REG_RSTCTRL:
++        s->regs[REG_INDEX(offset)] = (uint32_t) val;
++        mt7620_sysctrl_reset_control(s);
++        return;
++    default:
++        s->regs[REG_INDEX(offset)] = (uint32_t) val;
++        break;
++    }
++}
++
++static const MemoryRegionOps mt7620_sysctrl_ops = {
++    .read = mt7620_sysctrl_read,
++    .write = mt7620_sysctrl_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++    },
++    .impl.min_access_size = 4,
++};
++
++static void mt7620_sysctrl_reset(DeviceState *ds)
++{
++    mt7620SysCtrlState *s = MT7620_SYSCTRL(ds);
++    memcpy(&s->regs[REG_INDEX(REG_CHIPID0)], "MT76", 4);
++    memcpy(&s->regs[REG_INDEX(REG_CHIPID4)], "28  ", 4);
++    s->regs[REG_INDEX(REG_EECFG)]   = REG_EECFG_RST;
++    s->regs[REG_INDEX(REG_CHIPVER)] = REG_CHIPVER_RST;
++    s->regs[REG_INDEX(REG_ROMSTAT)] = REG_ROMSTAT_RST;
++    s->regs[REG_INDEX(REG_RSTCTRL)] = REG_RSTCTRL_RST;
++    mt7620_sysctrl_reset_control(s);
++}
++
++static void mt7620_sysctrl_init(Object *obj)
++{
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    mt7620SysCtrlState *s = MT7620_SYSCTRL(obj);
++
++    /* Memory mapping */
++    memory_region_init_io(&s->iomem, OBJECT(s), &mt7620_sysctrl_ops, s,
++                          TYPE_MT7620_SYSCTRL, MT7620_SYSCTRL_MEM_SIZE);
++    sysbus_init_mmio(sbd, &s->iomem);
++
++    /* reset line */
++    int i;
++    for (i = 0; i < 32; i++) {
++        sysbus_init_irq(sbd, &s->reset_line[i]);
++    }
++}
++
++static void mt7620_sysctrl_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->reset = mt7620_sysctrl_reset;
++}
++
++static const TypeInfo mt7620_sysctrl_info = {
++    .name          = TYPE_MT7620_SYSCTRL,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_init = mt7620_sysctrl_init,
++    .instance_size = sizeof(mt7620SysCtrlState),
++    .class_init    = mt7620_sysctrl_class_init,
++};
++
++static void mt7620_sysctrl_register(void)
++{
++    type_register_static(&mt7620_sysctrl_info);
++}
++
++type_init(mt7620_sysctrl_register)
+diff --git a/include/hw/misc/mt7620-sysctrl.h b/include/hw/misc/mt7620-sysctrl.h
+new file mode 100644
+index 0000000000..275e6bf63e
+--- /dev/null
++++ b/include/hw/misc/mt7620-sysctrl.h
+@@ -0,0 +1,59 @@
++/*
++ * Mediatek 7620 System Control emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef HW_MISC_MT7620_SYSCTRL_H
++#define HW_MISC_MT7620_SYSCTRL_H
++
++#include "qom/object.h"
++#include "hw/sysbus.h"
++
++#define TYPE_MT7620_SYSCTRL    "mt7620-sysctrl"
++OBJECT_DECLARE_SIMPLE_TYPE(mt7620SysCtrlState, MT7620_SYSCTRL)
++
++enum {
++    MT7620_SYSCTRL_MEM_SIZE = 0x100,
++    MT7620_SYSCTRL_REG_NUMS = MT7620_SYSCTRL_MEM_SIZE / sizeof(uint32_t),
++};
++
++enum {
++    REG_CHIPID0 = 0x00,
++    REG_CHIPID4 = 0x04,
++    REG_EECFG   = 0x08,
++    REG_CHIPVER = 0x0C,
++    REG_ROMSTAT = 0x28,
++    REG_RSTCTRL = 0x34,
++};
++
++enum {
++    REG_EECFG_RST   = 0x00000000,
++    REG_CHIPVER_RST = 0x00010102,
++    REG_ROMSTAT_RST = 0x00000001,
++    REG_RSTCTRL_RST = 0x00400040,
++};
++
++struct mt7620SysCtrlState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++
++    qemu_irq reset_line[32];
++
++    uint32_t regs[MT7620_SYSCTRL_REG_NUMS];
++};
++
++#endif
+-- 
+2.35.8
+

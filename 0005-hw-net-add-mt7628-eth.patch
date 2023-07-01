@@ -1,0 +1,759 @@
+From 5d85001a7b9262823e4465ec71147f35b7ba34bc Mon Sep 17 00:00:00 2001
+From: Lu Hui <luhux76@gmail.com>
+Date: Sat, 1 Jul 2023 14:01:28 +0800
+Subject: [PATCH 5/7] hw: net: add mt7628-eth
+
+---
+ hw/net/Kconfig              |   3 +
+ hw/net/meson.build          |   1 +
+ hw/net/mt7628-eth.c         | 590 ++++++++++++++++++++++++++++++++++++
+ include/hw/net/mt7628-eth.h | 117 +++++++
+ 4 files changed, 711 insertions(+)
+ create mode 100644 hw/net/mt7628-eth.c
+ create mode 100644 include/hw/net/mt7628-eth.h
+
+diff --git a/hw/net/Kconfig b/hw/net/Kconfig
+index 98e00be4f9..334677a771 100644
+--- a/hw/net/Kconfig
++++ b/hw/net/Kconfig
+@@ -158,3 +158,6 @@ config CAN_CTUCANFD_PCI
+     default y if PCI_DEVICES
+     depends on PCI && CAN_CTUCANFD
+     select CAN_BUS
++
++config MT7628_ETH
++    bool
+diff --git a/hw/net/meson.build b/hw/net/meson.build
+index 2632634df3..9d47d9780f 100644
+--- a/hw/net/meson.build
++++ b/hw/net/meson.build
+@@ -29,6 +29,7 @@ system_ss.add(when: 'CONFIG_ALLWINNER_SUN8I_EMAC', if_true: files('allwinner-sun
+ system_ss.add(when: 'CONFIG_IMX_FEC', if_true: files('imx_fec.c'))
+ system_ss.add(when: 'CONFIG_MSF2', if_true: files('msf2-emac.c'))
+ system_ss.add(when: 'CONFIG_MARVELL_88W8618', if_true: files('mv88w8618_eth.c'))
++system_ss.add(when: 'CONFIG_MT7628_ETH', if_true: files('mt7628-eth.c'))
+ 
+ system_ss.add(when: 'CONFIG_CADENCE', if_true: files('cadence_gem.c'))
+ system_ss.add(when: 'CONFIG_STELLARIS_ENET', if_true: files('stellaris_enet.c'))
+diff --git a/hw/net/mt7628-eth.c b/hw/net/mt7628-eth.c
+new file mode 100644
+index 0000000000..242e168b11
+--- /dev/null
++++ b/hw/net/mt7628-eth.c
+@@ -0,0 +1,590 @@
++/*
++ * Mediatek mt7628 ethernet emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * some code from uboot drivers/net/mt7628-eth.c:
++ * Copyright (C) 2018 Stefan Roese <sr@denx.de>
++ * some code from openwrt
++ * target/linux/ramips/files/drivers/net/ethernet/ralink/mtk_eth_soc.c
++ * Copyright (C) 2009-2015 John Crispin <blogic@openwrt.org>
++ * Copyright (C) 2009-2015 Felix Fietkau <nbd@nbd.name>
++ * Copyright (C) 2013-2015 Michael Lee <igvtee@gmail.com>
++ * some code from ./allwinner_emac.c:
++ * Copyright (C) 2014 Beniamino Galvani <b.galvani@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/units.h"
++#include "hw/net/mt7628-eth.h"
++#include "exec/address-spaces.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "migration/vmstate.h"
++#include "qapi/error.h"
++#include "sysemu/dma.h"
++
++// #define DEBUG_MT7628_ETH 1
++
++#ifdef DEBUG_MT7628_ETH
++#define DPRINTF(fmt, ...)                                                      \
++do {                                                                         \
++        printf("mt7628-eth: " fmt, ##__VA_ARGS__);                                 \
++} while (0)
++#else
++#define DPRINTF(fmt, ...)                                                      \
++do {                                                                         \
++} while (0)
++#endif
++
++#define REGINDEX(x) ((x) / sizeof(uint32_t))
++
++    static void mt7628_esw_update_irq(void *opaque);
++
++static void mt7628_phy_set_link(mt7628EthState *s, bool link_ok) {
++    if (link_ok) {
++        DPRINTF("link connected\n");
++        s->phy_regs[MII_BMSR] |= MII_BMCR_FD | MII_BMCR_AUTOEN | MII_BMCR_SPEED;
++        ;
++        s->phy_regs[MII_BMSR] |= MII_BMSR_LINK_ST | MII_BMSR_AN_COMP;
++        s->phy_regs[MII_ANLPAR] |=
++            MII_ANAR_TXFD | MII_ANAR_10FD | MII_ANAR_10 | MII_ANAR_CSMACD;
++    } else {
++        DPRINTF("link disconnected\n");
++        s->phy_regs[MII_BMSR] &= ~(MII_BMSR_LINK_ST | MII_BMSR_AN_COMP);
++        s->phy_regs[MII_ANLPAR] = MII_ANAR_TX;
++    }
++    set_bit(26, (void *)&s->esw_regs[REGINDEX(REG_ESW_INTR_STAT)]);
++    mt7628_esw_update_irq(s);
++}
++
++static void mt7628_phy_reset(mt7628EthState *s, bool link_ok) {
++    DPRINTF("phy reset\n");
++    s->phy_regs[MII_BMSR] = MII_BMCR_FD | MII_BMCR_AUTOEN | MII_BMCR_SPEED;
++    s->phy_regs[MII_BMSR] = MII_BMSR_100TX_FD | MII_BMSR_100TX_HD |
++                            MII_BMSR_10T_FD | MII_BMSR_10T_HD | MII_BMSR_MFPS |
++                            MII_BMSR_AUTONEG;
++    s->phy_regs[MII_ANAR] = MII_ANAR_TXFD | MII_ANAR_TX | MII_ANAR_10FD |
++                            MII_ANAR_10 | MII_ANAR_CSMACD;
++    s->phy_regs[MII_ANLPAR] = MII_ANAR_TX;
++
++    mt7628_phy_set_link(s, link_ok);
++}
++
++static uint64_t mt7628_phy_read(void *opaque, uint8_t reg) {
++    mt7628EthState *s = MT7628_ETH(opaque);
++    if (reg >= 32) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: reg 0x%x is out of device\n", __func__,
++                      reg);
++        return 0x0;
++    }
++    DPRINTF("phy read reg 0x%02x val 0x%04x\n", reg, s->phy_regs[reg]);
++    return s->phy_regs[reg];
++}
++
++static void mt7628_phy_write(void *opaque, uint8_t reg, uint16_t val) {
++    mt7628EthState *s = opaque;
++    NetClientState *nc = qemu_get_queue(s->nic);
++    if (reg >= 32) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: reg 0x%x is out of device\n", __func__,
++                      reg);
++        return;
++    }
++    switch (reg) {
++    case MII_BMCR:
++        if (val & MII_BMCR_RESET) {
++            mt7628_phy_reset(s, !nc->link_down);
++        } else {
++            s->phy_regs[MII_BMCR] = val;
++        }
++        break;
++    default:
++        s->phy_regs[reg] = val;
++        break;
++    }
++    DPRINTF("phy write reg 0x%02x val 0x%04x\n", reg, val);
++}
++
++static void mt7628_phy_init(void *opaque) {
++    DPRINTF("phy init\n");
++    mt7628EthState *s = MT7628_ETH(opaque);
++    NetClientState *nc = qemu_get_queue(s->nic);
++    memset(s->phy_regs, 0, sizeof(uint16_t) * 32);
++    mt7628_phy_reset(s, !nc->link_down);
++}
++
++static void mt7628_fe_update_irq(void *opaque) {
++    mt7628EthState *s = MT7628_ETH(opaque);
++    uint32_t irq = s->fe_regs[REGINDEX(REG_FE_INTR_STAT)] &
++                   s->fe_regs[REGINDEX(REG_FE_INTR_MASK)];
++    DPRINTF("fe intr state: 0x%08x\n", s->fe_regs[REGINDEX(REG_FE_INTR_STAT)]);
++    DPRINTF("fe intr mask : 0x%08x\n", s->fe_regs[REGINDEX(REG_FE_INTR_MASK)]);
++    DPRINTF("fe update irq: 0x%08x\n", irq);
++    qemu_set_irq(s->fe_irq, !!irq);
++}
++
++static void mt7628_fe_reset(DeviceState *dev) {
++    DPRINTF("fe reset\n");
++    mt7628EthState *s = MT7628_ETH(dev);
++    memset(s->fe_regs, 0, sizeof(uint32_t) * MT7628_FE_REG_NUMS);
++    mt7628_fe_update_irq(dev);
++}
++
++static void mt7628_eth_send(mt7628EthState *s);
++
++static uint64_t mt7628_fe_read(void *opaque, hwaddr addr, unsigned size) {
++    mt7628EthState *s = MT7628_ETH(opaque);
++    (void)s;
++
++    if (addr >= MT7628_FE_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: addr %lx is out of device\n", __func__,
++                      addr);
++        return 0x0;
++    }
++    DPRINTF("fe read addr 0x%08lx val 0x%08x\n", addr,
++            s->fe_regs[REGINDEX(addr)]);
++    return s->fe_regs[REGINDEX(addr)];
++}
++
++static void mt7628_fe_write(void *opaque, hwaddr addr, uint64_t val,
++                            unsigned size) {
++    mt7628EthState *s = opaque;
++    (void)s;
++    if (addr >= MT7628_FE_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: addr %lx is out of device\n", __func__,
++                      addr);
++        return;
++    }
++    switch (addr) {
++    case REG_FE_INTR_STAT:
++        s->fe_regs[REGINDEX(addr)] &= ~val;
++        mt7628_fe_update_irq(s);
++        break;
++    case REG_FE_INTR_MASK:
++        s->fe_regs[REGINDEX(addr)] = val;
++        mt7628_fe_update_irq(s);
++        break;
++    case REG_FE_PDMA_RST:
++        if (test_bit(0, (void *)&val)) {
++            s->fe_regs[REGINDEX(REG_FE_TX_DMA0)] = 0x0;
++        }
++        if (test_bit(16, (void *)&val)) {
++            s->fe_regs[REGINDEX(REG_FE_RX_DMA0)] = 0x0;
++        }
++        s->fe_regs[REGINDEX(addr)] = val;
++        break;
++    case REG_FE_MAC_ADDRH:
++        s->conf.macaddr.a[1] = extract32((uint32_t)val, 0, 8);
++        s->conf.macaddr.a[0] = extract32((uint32_t)val, 8, 8);
++        s->fe_regs[REGINDEX(addr)] = val;
++        break;
++    case REG_FE_MAC_ADDRL:
++        s->conf.macaddr.a[5] = extract32((uint32_t)val, 0, 8);
++        s->conf.macaddr.a[4] = extract32((uint32_t)val, 8, 8);
++        s->conf.macaddr.a[3] = extract32((uint32_t)val, 16, 8);
++        s->conf.macaddr.a[2] = extract32((uint32_t)val, 24, 8);
++        s->fe_regs[REGINDEX(addr)] = val;
++        break;
++    default:
++        s->fe_regs[REGINDEX(addr)] = val;
++        break;
++    }
++    DPRINTF("fe write addr 0x%08lx val 0x%08lx\n", addr, val);
++    mt7628_eth_send(s);
++}
++
++static const MemoryRegionOps mt7628_fe_ops = {
++    .read = mt7628_fe_read,
++    .write = mt7628_fe_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid =
++    {
++        .min_access_size = 4,
++        .max_access_size = 4,
++    },
++    .impl.min_access_size = 4,
++};
++
++static void mt7628_esw_update_irq(void *opaque) {
++    mt7628EthState *s = MT7628_ETH(opaque);
++    uint32_t irq = s->esw_regs[REGINDEX(REG_ESW_INTR_STAT)] &
++                   s->fe_regs[REGINDEX(REG_ESW_INTR_MASK)];
++    DPRINTF("esw intr state: 0x%08x\n", s->esw_regs[REGINDEX(REG_ESW_INTR_STAT)]);
++    DPRINTF("esw intr mask : 0x%08x\n", s->esw_regs[REGINDEX(REG_ESW_INTR_MASK)]);
++    DPRINTF("esw update irq: 0x%08x\n", irq);
++    qemu_set_irq(s->esw_irq, !!irq);
++}
++
++static void mt7628_esw_reset(DeviceState *dev) {
++    DPRINTF("esw reset\n");
++    mt7628EthState *s = MT7628_ETH(dev);
++    memset(s->esw_regs, 0, sizeof(uint32_t) * MT7628_ESW_REG_NUMS);
++    mt7628_esw_update_irq(dev);
++}
++
++static uint64_t mt7628_esw_read(void *opaque, hwaddr addr, unsigned size) {
++    mt7628EthState *s = MT7628_ETH(opaque);
++
++    if (addr >= MT7628_ESW_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: addr %lx is out of device\n", __func__,
++                      addr);
++        return 0x0;
++    }
++
++    switch (addr) {
++    case REG_ESW_PHYC1:
++        /* simple blink it */
++        change_bit(0, (void *)&s->esw_regs[REGINDEX(REG_ESW_PHYC1)]);
++        change_bit(1, (void *)&s->esw_regs[REGINDEX(REG_ESW_PHYC1)]);
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "%s: addr %lx is not impl\n", __func__, addr);
++        break;
++    }
++
++    DPRINTF("esw read addr 0x%08lx val 0x%08x\n", addr,
++            s->esw_regs[REGINDEX(addr)]);
++    return s->esw_regs[REGINDEX(addr)];
++}
++
++static void mt7628_esw_write(void *opaque, hwaddr addr, uint64_t val,
++                             unsigned size) {
++    mt7628EthState *s = opaque;
++    if (addr >= MT7628_ESW_MEM_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: addr %lx is out of device\n", __func__,
++                      addr);
++    }
++
++    uint8_t phy_reg_addr;
++    uint16_t mdio_wt_data, mdio_rd_data;
++
++    switch (addr) {
++    case REG_ESW_INTR_STAT:
++        s->esw_regs[REGINDEX(addr)] &= ~val;
++        mt7628_esw_update_irq(s);
++        break;
++    case REG_ESW_INTR_MASK:
++        s->esw_regs[REGINDEX(addr)] = val;
++        mt7628_esw_update_irq(s);
++        break;
++    case REG_ESW_RST:
++        mt7628_esw_reset(DEVICE(opaque));
++        return;
++    case REG_ESW_PHYC0:
++        phy_reg_addr = extract32(val, 8, 5);
++        mdio_wt_data = extract32(val, 16, 16);
++        if (test_bit(13, (void *)&val)) {
++            clear_bit(13, (void *)&val);
++            mt7628_phy_write(opaque, phy_reg_addr, mdio_wt_data);
++        }
++        if (test_bit(14, (void *)&val)) {
++            clear_bit(14, (void *)&val);
++            mdio_rd_data = mt7628_phy_read(opaque, phy_reg_addr);
++            s->esw_regs[REGINDEX(REG_ESW_PHYC1)] &= ~(0xFF << 16);
++            s->esw_regs[REGINDEX(REG_ESW_PHYC1)] |= mdio_rd_data << 16;
++        }
++        s->esw_regs[REGINDEX(addr)] = val;
++        break;
++    case REG_ESW_PHYC1: /* seem read only */
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "%s: addr %lx is not impl\n", __func__, addr);
++        s->esw_regs[REGINDEX(addr)] = val;
++        break;
++    }
++    DPRINTF("esw write addr 0x%08lx val 0x%08lx\n", addr, val);
++}
++
++static const MemoryRegionOps mt7628_esw_ops = {
++    .read = mt7628_esw_read,
++    .write = mt7628_esw_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid =
++    {
++        .min_access_size = 4,
++        .max_access_size = 4,
++    },
++    .impl.min_access_size = 4,
++};
++
++static void mt7628_eth_reset(DeviceState *dev) {
++    DPRINTF("eth reset\n");
++    mt7628_phy_init(dev);
++    mt7628_fe_reset(dev);
++    mt7628_esw_reset(dev);
++}
++
++static void mt7628_eth_init(Object *obj) {
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    mt7628EthState *s = MT7628_ETH(obj);
++
++    /* Memory mapping */
++    memory_region_init_io(&s->fe_iomem, OBJECT(s), &mt7628_fe_ops, s,
++                          TYPE_MT7628_ETH, MT7628_FE_MEM_SIZE);
++    sysbus_init_mmio(sbd, &s->fe_iomem);
++    memory_region_init_io(&s->esw_iomem, OBJECT(s), &mt7628_esw_ops, s,
++                          TYPE_MT7628_ETH, MT7628_ESW_MEM_SIZE);
++    sysbus_init_mmio(sbd, &s->esw_iomem);
++
++    /* interrupt */
++    sysbus_init_irq(sbd, &s->fe_irq);
++    sysbus_init_irq(sbd, &s->esw_irq);
++
++    /* reset line */
++    sysbus_init_irq(sbd, &s->fe_reset_line);
++    sysbus_init_irq(sbd, &s->esw_reset_line);
++    s->fe_reset_asserted = false;
++    s->esw_reset_asserted = false;
++}
++
++static inline uint32_t mt7628_dma_index_prev(uint32_t index, uint32_t range) {
++    if (index == 0) {
++        return (range - 1);
++    } else {
++        return index--;
++    }
++}
++
++static inline uint32_t mt7628_dma_index_next(uint32_t index, uint32_t range) {
++    return ((index + 1) % range);
++}
++
++static void mt7628_eth_send(mt7628EthState *s) {
++    NetClientState *nc = qemu_get_queue(s->nic);
++
++    if (test_bit(0, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]) == 0) {
++        DPRINTF("tx dma not enable\n");
++        return;
++    }
++    if (test_bit(1, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)])) {
++        DPRINTF("tx dma is busy\n");
++        return;
++    }
++    set_bit(1, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]);
++
++    if (0 == s->fe_regs[REGINDEX(REG_FE_TX_BASE0)]) {
++        DPRINTF("tx ring base0 not setup\n");
++        return;
++    }
++
++    if (0 == s->fe_regs[REGINDEX(REG_FE_TX_CNT0)]) {
++        DPRINTF("tx ring range not setup\n");
++        return;
++    }
++
++    s->fe_regs[REGINDEX(REG_FE_TX_CNT0)] &= MT7628_FE_DMA_RING_MAX_CNT;
++
++    dma_memory_read(
++        &s->fe_dma_as, s->fe_regs[REGINDEX(REG_FE_TX_BASE0)], s->tx_dma_ring,
++        (s->fe_regs[REGINDEX(REG_FE_TX_CNT0)] * sizeof(struct mt7628EthdmaRing)),
++        MEMTXATTRS_UNSPECIFIED);
++    uint32_t dma_index = s->fe_regs[REGINDEX(REG_FE_TX_DMA0)];
++    uint32_t cpu_index = s->fe_regs[REGINDEX(REG_FE_TX_CPU0)];
++    uint32_t index_range = s->fe_regs[REGINDEX(REG_FE_TX_CNT0)];
++    uint32_t pkt_size = 0;
++    if (dma_index == cpu_index) {
++        dma_index = mt7628_dma_index_prev(dma_index, index_range);
++    }
++    while (dma_index != cpu_index) {
++        DPRINTF("tx dma index is %u\n", dma_index);
++        DPRINTF("tx dma ring address is 0x%08lx\n",
++                (s->fe_regs[REGINDEX(REG_FE_TX_BASE0)] +
++                 sizeof(struct mt7628EthdmaRing) * dma_index));
++        DPRINTF("tx cpu index is %u\n", cpu_index);
++        if (s->tx_dma_ring[dma_index].addr == 0) {
++            DPRINTF("tx packet address not setup\n");
++            goto next;
++        } else {
++            DPRINTF("tx packet address is 0x%08x\n", s->tx_dma_ring[dma_index].addr);
++        }
++        DPRINTF("tx dma ring attr1 is 0x%08x\n", s->tx_dma_ring[dma_index].attr1);
++        DPRINTF("tx dma ring attr2 is 0x%08x\n", s->tx_dma_ring[dma_index].attr2);
++        DPRINTF("tx dma ring attr3 is 0x%08x\n", s->tx_dma_ring[dma_index].attr3);
++        if (test_bit(31, (void *)&s->tx_dma_ring[dma_index].attr1)) {
++            DPRINTF("packet is sended, skip\n");
++            goto next;
++        } else {
++            pkt_size = (s->tx_dma_ring[dma_index].attr1) >> 16;
++            pkt_size &= 0x3FFF;
++            DPRINTF("packet size is 0x%08x\n", pkt_size);
++            dma_memory_read(&s->fe_dma_as, s->tx_dma_ring[dma_index].addr, s->txbuf,
++                            pkt_size, MEMTXATTRS_UNSPECIFIED);
++            qemu_send_packet(nc, s->txbuf, pkt_size);
++            set_bit(31, (void *)&s->tx_dma_ring[dma_index].attr1);
++            s->fe_regs[REGINDEX(REG_FE_TX_BYTES)] += pkt_size;
++            DPRINTF("tx bytes: %u\n", s->fe_regs[REGINDEX(REG_FE_TX_BYTES)]);
++            s->fe_regs[REGINDEX(REG_FE_TX_PKTS)] += 1;
++            DPRINTF("tx pkts: %u\n", s->fe_regs[REGINDEX(REG_FE_TX_PKTS)]);
++            set_bit(0, (void *)&s->fe_regs[REGINDEX(REG_FE_INTR_STAT)]);
++            mt7628_fe_update_irq(s);
++        }
++    next:
++        dma_index = mt7628_dma_index_next(dma_index, index_range);
++    }
++    dma_memory_write(
++        &s->fe_dma_as, s->fe_regs[REGINDEX(REG_FE_TX_BASE0)], s->tx_dma_ring,
++        (s->fe_regs[REGINDEX(REG_FE_TX_CNT0)] * sizeof(struct mt7628EthdmaRing)),
++        MEMTXATTRS_UNSPECIFIED);
++    s->fe_regs[REGINDEX(REG_FE_TX_DMA0)] = dma_index;
++
++    clear_bit(1, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]);
++}
++
++static bool mt7628_eth_can_receive(NetClientState *nc) {
++    mt7628EthState *s = qemu_get_nic_opaque(nc);
++
++    if (test_bit(2, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]) == 0) {
++        DPRINTF("rx dma not enable\n");
++        return false;
++    }
++    if (test_bit(3, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)])) {
++        DPRINTF("rx dma is busy\n");
++        return false;
++    }
++
++    if (0 == s->fe_regs[REGINDEX(REG_FE_RX_BASE0)]) {
++        DPRINTF("rx ring base0 not setup\n");
++        return false;
++    }
++
++    if (0 == s->fe_regs[REGINDEX(REG_FE_RX_CNT0)]) {
++        DPRINTF("rx ring range not setup\n");
++        return false;
++    }
++
++    uint32_t cpu_index = s->fe_regs[REGINDEX(REG_FE_RX_CPU0)];
++    uint32_t dma_index = s->fe_regs[REGINDEX(REG_FE_RX_DMA0)];
++    dma_memory_read(
++        &s->fe_dma_as, s->fe_regs[REGINDEX(REG_FE_RX_BASE0)], s->rx_dma_ring,
++        (s->fe_regs[REGINDEX(REG_FE_RX_CNT0)] * sizeof(struct mt7628EthdmaRing)),
++        MEMTXATTRS_UNSPECIFIED);
++
++    DPRINTF("rx cpu index: %d\n", cpu_index);
++    DPRINTF("rx dma index: %d\n", dma_index);
++    if (dma_index != cpu_index) {
++        if (s->rx_dma_ring[dma_index].addr == 0) {
++            DPRINTF("rx packet address not setup\n");
++            return false;
++        }
++        if (test_bit(31, (void *)&s->rx_dma_ring[dma_index].attr1)) {
++            DPRINTF("this rx position is used\n");
++            return false;
++        }
++        return true;
++    }
++    return false;
++}
++
++static ssize_t mt7628_eth_receive(NetClientState *nc, const uint8_t *buf,
++                                  size_t size) {
++    mt7628EthState *s = qemu_get_nic_opaque(nc);
++    set_bit(3, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]);
++
++    uint32_t dma_index = s->fe_regs[REGINDEX(REG_FE_RX_DMA0)];
++    uint32_t index_range = s->fe_regs[REGINDEX(REG_FE_RX_CNT0)];
++    uint32_t pkt_addr = s->rx_dma_ring[dma_index].addr;
++    uint32_t pkt_size =
++        size < MT7628_FE_MAX_PKT_SIZE ? size : MT7628_FE_MAX_PKT_SIZE;
++    /* rx_dma_ring is read by call mt7628_eth_can_receive() function, so skip it,
++   * dont waste your cpu :) */
++    dma_memory_write(&s->fe_dma_as, pkt_addr, buf, pkt_size,
++                     MEMTXATTRS_UNSPECIFIED);
++    s->rx_dma_ring[dma_index].attr1 |= (pkt_size & 0x3FF) << 16;
++    set_bit(31, (void *)&s->rx_dma_ring[dma_index].attr1);
++    dma_memory_write(
++        &s->fe_dma_as, s->fe_regs[REGINDEX(REG_FE_RX_BASE0)], s->rx_dma_ring,
++        (s->fe_regs[REGINDEX(REG_FE_RX_CNT0)] * sizeof(struct mt7628EthdmaRing)),
++        MEMTXATTRS_UNSPECIFIED);
++    s->fe_regs[REGINDEX(REG_FE_RX_BYTES)] += pkt_size;
++    DPRINTF("rx bytes: %u\n", s->fe_regs[REGINDEX(REG_FE_RX_BYTES)]);
++    s->fe_regs[REGINDEX(REG_FE_RX_PKTS)] += 1;
++    DPRINTF("rx pkts: %u\n", s->fe_regs[REGINDEX(REG_FE_RX_PKTS)]);
++    dma_index = mt7628_dma_index_next(dma_index, index_range);
++    s->fe_regs[REGINDEX(REG_FE_RX_DMA0)] = dma_index;
++
++    clear_bit(3, (void *)&s->fe_regs[REGINDEX(REG_FE_PDMA_CFG)]);
++    set_bit(16, (void *)&s->fe_regs[REGINDEX(REG_FE_INTR_STAT)]);
++    mt7628_fe_update_irq(s);
++    return pkt_size;
++}
++
++static void mt7628_eth_set_link(NetClientState *nc) {
++    mt7628EthState *s = qemu_get_nic_opaque(nc);
++
++    mt7628_phy_set_link(s, !nc->link_down);
++}
++
++static NetClientInfo net_mt7628_eth_info = {
++    .type = NET_CLIENT_DRIVER_NIC,
++    .size = sizeof(NICState),
++    .can_receive = mt7628_eth_can_receive,
++    .receive = mt7628_eth_receive,
++    .link_status_changed = mt7628_eth_set_link,
++};
++
++static void mt7628_eth_realize(DeviceState *dev, Error **errp) {
++    mt7628EthState *s = MT7628_ETH(dev);
++
++    if (!s->fe_dma_mr) {
++        error_setg(errp, TYPE_MT7628_ETH " dma link not connect");
++        return;
++    }
++    address_space_init(&s->fe_dma_as, s->fe_dma_mr, "fe-dma");
++
++    s->nic = qemu_new_nic(&net_mt7628_eth_info, &s->conf,
++                          object_get_typename(OBJECT(dev)), dev->id, s);
++    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
++
++    /* register reset */
++    mt7628_eth_reset(dev);
++}
++
++static const VMStateDescription mt7628_eth_vmstate = {
++    .name = "mt7628-eth",
++    .version_id = 1,
++    .minimum_version_id = 1,
++};
++
++static Property mt7628_eth_properties[] = {
++    DEFINE_NIC_PROPERTIES(mt7628EthState, conf),
++    DEFINE_PROP_LINK("dma-memory", mt7628EthState, fe_dma_mr,
++                     TYPE_MEMORY_REGION, MemoryRegion *),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void mt7628_eth_class_init(ObjectClass *klass, void *data) {
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    dc->realize = mt7628_eth_realize;
++    dc->reset = mt7628_eth_reset;
++    dc->vmsd = &mt7628_eth_vmstate;
++    device_class_set_props(dc, mt7628_eth_properties);
++}
++
++static const TypeInfo mt7628_eth_info = {
++    .name = TYPE_MT7628_ETH,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_init = mt7628_eth_init,
++    .instance_size = sizeof(mt7628EthState),
++    .class_init = mt7628_eth_class_init,
++};
++
++static void mt7628_eth_register(void) {
++    type_register_static(&mt7628_eth_info);
++}
++
++type_init(mt7628_eth_register)
+diff --git a/include/hw/net/mt7628-eth.h b/include/hw/net/mt7628-eth.h
+new file mode 100644
+index 0000000000..d66c043015
+--- /dev/null
++++ b/include/hw/net/mt7628-eth.h
+@@ -0,0 +1,117 @@
++/*
++ * Mediatek mt7628 ethernet emulation
++ *
++ * Copyright (C) 2023 Lu Hui <luhux76@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef HW_MT7628_ETH_H
++#define HW_MT7628_ETH_H
++
++#include "qom/object.h"
++#include "hw/sysbus.h"
++#include "net/net.h"
++#include "hw/net/mii.h"
++
++#define TYPE_MT7628_ETH    "mt7628-eth"
++OBJECT_DECLARE_SIMPLE_TYPE(mt7628EthState, MT7628_ETH)
++
++struct mt7628EthdmaRing {
++    uint32_t addr;
++    uint32_t attr1;
++    uint32_t attr2;
++    uint32_t attr3;
++};
++
++enum {
++    MT7628_FE_MEM_SIZE = 64 * KiB,
++    MT7628_FE_REG_NUMS = MT7628_FE_MEM_SIZE / sizeof(uint32_t),
++    MT7628_ESW_MEM_SIZE = 32 * KiB,
++    MT7628_ESW_REG_NUMS = MT7628_ESW_MEM_SIZE / sizeof(uint32_t),
++    MT7628_FE_DMA_RING_MAX_CNT = 0xFFF,
++    MT7628_FE_DMA_RING_MAX_SIZE = MT7628_FE_DMA_RING_MAX_CNT * sizeof(struct mt7628EthdmaRing),
++    MT7628_FE_MAX_PKT_SIZE = 2048,
++};
++
++enum {
++    REG_FE_TX_BASE0  = 0x800,
++    REG_FE_TX_CNT0   = 0x804,
++    REG_FE_TX_CPU0   = 0x808,
++    REG_FE_TX_DMA0   = 0x80C,
++
++    REG_FE_RX_BASE0  = 0x900,
++    REG_FE_RX_CNT0   = 0x904,
++    REG_FE_RX_CPU0   = 0x908,
++    REG_FE_RX_DMA0   = 0x90C,
++
++    REG_FE_PDMA_CFG  = 0xA04,
++    REG_FE_PDMA_RST  = 0xA08,
++    REG_FE_INTR_STAT = 0xA20,
++    REG_FE_INTR_MASK = 0xA28,
++
++    REG_FE_MAC_ADDRL = 0xC0C,
++    REG_FE_MAC_ADDRH = 0xC10,
++
++    REG_FE_TX_PKTS   = 0xD00,
++    REG_FE_TX_BYTES  = 0xD04,
++    REG_FE_RX_PKTS   = 0xD08,
++    REG_FE_RX_BYTES  = 0xD0C,
++
++    REG_ESW_INTR_STAT = 0x000,
++    REG_ESW_INTR_MASK = 0x004,
++    REG_ESW_RST       = 0x0A0,
++    REG_ESW_PHYC0     = 0x0C0,
++    REG_ESW_PHYC1     = 0x0C4,
++};
++
++struct mt7628PhyState {
++    uint16_t bmcr;
++    uint16_t bmsr;
++    uint16_t anar;
++    uint16_t anlpar;
++};
++
++struct mt7628EthState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion fe_iomem;
++    MemoryRegion esw_iomem;
++
++    AddressSpace fe_dma_as;
++    MemoryRegion *fe_dma_mr;
++
++    qemu_irq fe_irq;
++    qemu_irq esw_irq;
++
++    qemu_irq fe_reset_line;
++    qemu_irq esw_reset_line;
++
++    bool fe_reset_asserted;
++    bool esw_reset_asserted;
++
++    uint16_t phy_regs[32];
++    uint32_t fe_regs[MT7628_FE_REG_NUMS];
++    uint32_t esw_regs[MT7628_ESW_REG_NUMS];
++
++    struct mt7628EthdmaRing tx_dma_ring[MT7628_FE_DMA_RING_MAX_CNT];
++    struct mt7628EthdmaRing rx_dma_ring[MT7628_FE_DMA_RING_MAX_CNT];
++
++    uint8_t txbuf[MT7628_FE_MAX_PKT_SIZE];
++
++    NICState *nic;
++    NICConf conf;
++};
++
++#endif /* HW_MT7628_ETH_H */
+-- 
+2.35.8
+
