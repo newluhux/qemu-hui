@@ -7,31 +7,31 @@ emulate some hardware use for run firmware.
 aw is allwiner
 mt is mediatek
 
-|                | mt7628 | aw-f1c100s | aw-d1 | aw-v85x |
-|----------------+--------+------------+-------+---------|
-| INTC           | v      |            |       |         |
-| TIMER          |        |            |       |         |
-| UART           | v      |            |       |         |
-| GPIO           |        |            |       |         |
-| SPI            | v      |            |       |         |
-| MMC            |        |            |       |         |
-| I2C            |        |            |       |         |
-| USB            | v      |            |       |         |
-| SATA           | x      | x          | x     | x       |
-| PCIE           |        | x          | x     | x       |
-| ETHERNET       | v      | x          |       |         |
-| DISPLAY        | x      |            |       |         |
-| AUDIO          |        |            |       |         |
-| BROM           | x      |            |       |         |
-|----------------+--------+------------+-------+---------|
-| BOOT FROM SPI  | v      |            |       |         |
-| BOOT FROM MMC  | x      |            |       |         |
-| BOOT FROM UART | x      | x          |       |         |
-| SPL            | v      |            |       |         |
-| LINUX          | v      |            |       |         |
-| UBOOT          | v      |            |       |         |
-| NETBSD         |        |            |       |         |
-| 9FRONT         |        |            |       |         |
+|                | mt7628 | aw-d1 |
+|----------------+--------+-------|
+| INTC           | v      |       |
+| TIMER          |        |       |
+| UART           | v      |       |
+| GPIO           |        |       |
+| SPI            | v      |       |
+| MMC            |        |       |
+| I2C            |        |       |
+| USB            | v      |       |
+| SATA           | x      | x     |
+| PCIE           |        | x     |
+| ETHERNET       | v      |       |
+| DISPLAY        | x      |       |
+| AUDIO          |        |       |
+| BROM           | x      |       |
+|----------------+--------+-------|
+| BOOT FROM SPI  | v      |       |
+| BOOT FROM MMC  | x      |       |
+| BOOT FROM UART | x      | x     |
+| SPL            | v      |       |
+| LINUX          | v      |       |
+| UBOOT          | v      |       |
+| NETBSD         |        |       |
+| 9FRONT         |        |       |
 
 ** build
 
