@@ -1,6 +1,6 @@
-From 0cc3d1586ec7cd73ed928350616cb918d5c4e52d Mon Sep 17 00:00:00 2001
+From eb9654388c1a8a8906589144365de22af65aebda Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:00:15 +0800
+Date: Sun, 27 Aug 2023 15:41:49 +0800
 Subject: [PATCH 2/7] hw: block: m25p80: add w25q128
 
 ---
@@ -8,7 +8,7 @@ Subject: [PATCH 2/7] hw: block: m25p80: add w25q128
  1 file changed, 1 insertion(+)
 
 diff --git a/hw/block/m25p80.c b/hw/block/m25p80.c
-index dc5ffbc4ff..07a4449a23 100644
+index dc5ffbc..07a4449 100644
 --- a/hw/block/m25p80.c
 +++ b/hw/block/m25p80.c
 @@ -347,6 +347,7 @@ static const FlashPartInfo known_devices[] = {
@@ -20,5 +20,5 @@ index dc5ffbc4ff..07a4449a23 100644
        .sfdp_read = m25p80_sfdp_w25q256 },
      { INFO("w25q512jv",   0xef4020,      0,  64 << 10, 1024, ER_4K),
 -- 
-2.35.8
+2.41.0
 

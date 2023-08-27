@@ -1,6 +1,6 @@
-From f41e7c0b4003083f80eff7db1adb42482d8c3422 Mon Sep 17 00:00:00 2001
+From 62de6a0e127f0ff9c8cb21f2936ade35e76df774 Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:02:09 +0800
+Date: Sun, 27 Aug 2023 15:43:31 +0800
 Subject: [PATCH 7/7] configs: mips: enable mt7628 eval board
 
 ---
@@ -8,7 +8,7 @@ Subject: [PATCH 7/7] configs: mips: enable mt7628 eval board
  1 file changed, 1 insertion(+)
 
 diff --git a/configs/devices/mips-softmmu/common.mak b/configs/devices/mips-softmmu/common.mak
-index 7da99327a7..931334b2cc 100644
+index 7da9932..931334b 100644
 --- a/configs/devices/mips-softmmu/common.mak
 +++ b/configs/devices/mips-softmmu/common.mak
 @@ -29,3 +29,4 @@ CONFIG_PCNET_PCI=y
@@ -17,5 +17,5 @@ index 7da99327a7..931334b2cc 100644
  CONFIG_TEST_DEVICES=y
 +CONFIG_MIPS_MT7628_EVB=y
 -- 
-2.35.8
+2.41.0
 

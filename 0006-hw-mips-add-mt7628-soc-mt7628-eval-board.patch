@@ -1,21 +1,21 @@
-From d70bbf6d0967beda3e8d73ffbb9b2bd052bd7c1c Mon Sep 17 00:00:00 2001
+From 913342b23451d8aec7d118c88c61be8e252ae111 Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:01:52 +0800
+Date: Sun, 27 Aug 2023 15:43:16 +0800
 Subject: [PATCH 6/7] hw: mips: add mt7628 soc & mt7628 eval board
 
 ---
  hw/mips/Kconfig          |  17 ++++
  hw/mips/meson.build      |   2 +
- hw/mips/mt7628.c         | 185 +++++++++++++++++++++++++++++++++++++++
+ hw/mips/mt7628.c         | 182 +++++++++++++++++++++++++++++++++++++++
  hw/mips/mt7628_evb.c     | 157 +++++++++++++++++++++++++++++++++
  include/hw/mips/mt7628.h |  89 +++++++++++++++++++
- 5 files changed, 450 insertions(+)
+ 5 files changed, 447 insertions(+)
  create mode 100644 hw/mips/mt7628.c
  create mode 100644 hw/mips/mt7628_evb.c
  create mode 100644 include/hw/mips/mt7628.h
 
 diff --git a/hw/mips/Kconfig b/hw/mips/Kconfig
-index da3a37e215..5c0dcd929c 100644
+index da3a37e..5c0dcd9 100644
 --- a/hw/mips/Kconfig
 +++ b/hw/mips/Kconfig
 @@ -61,3 +61,20 @@ config MIPS_BOSTON
@@ -40,7 +40,7 @@ index da3a37e215..5c0dcd929c 100644
 +    select MIPS_MT7628
 +    select SSI_M25P80
 diff --git a/hw/mips/meson.build b/hw/mips/meson.build
-index 900613fc08..d9bb49a0ca 100644
+index 900613f..d9bb49a 100644
 --- a/hw/mips/meson.build
 +++ b/hw/mips/meson.build
 @@ -10,6 +10,8 @@ mips_ss.add(when: 'CONFIG_JAZZ', if_true: files('jazz.c'))
@@ -54,10 +54,10 @@ index 900613fc08..d9bb49a0ca 100644
  hw_arch += {'mips': mips_ss}
 diff --git a/hw/mips/mt7628.c b/hw/mips/mt7628.c
 new file mode 100644
-index 0000000000..be2f4b9f80
+index 0000000..844030f
 --- /dev/null
 +++ b/hw/mips/mt7628.c
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,182 @@
 +/*
 + * Mediatek 7628 System on Chip emulation
 + *
@@ -169,8 +169,6 @@ index 0000000000..be2f4b9f80
 +    sysbus_realize(SYS_BUS_DEVICE(&s->sysctrl), &error_abort);
 +    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysctrl), 0, s->memmap[MT7628_DEV_SYSCTRL]);
 +    sysbus_realize(SYS_BUS_DEVICE(&s->intc), errp);
-+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 1,
-+                       s->sysctrl.reset_line[MT7628_RST_INTC]);
 +    sysbus_realize(SYS_BUS_DEVICE(&s->spi_m), &error_abort);
 +    sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0, s->memmap[MT7628_DEV_INTC]);
 +    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0,
@@ -211,7 +209,6 @@ index 0000000000..be2f4b9f80
 +                    qdev_get_gpio_in(dev, MT7628_IRQ_EHCI));
 +    sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi_m), 0, s->memmap[MT7628_DEV_SPI_M]);
 +    sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi_m), 1, s->memmap[MT7628_DEV_FLASH]);
-+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->spi_m), 1, s->sysctrl.reset_line[MT7628_RST_SPI_M]);
 +
 +    /* unimplemented devices */
 +    for (i = 0; i < ARRAY_SIZE(mt7628_unimp); i++) {
@@ -245,7 +242,7 @@ index 0000000000..be2f4b9f80
 +type_init(mt7628_register_types)
 diff --git a/hw/mips/mt7628_evb.c b/hw/mips/mt7628_evb.c
 new file mode 100644
-index 0000000000..868a6a7cb0
+index 0000000..868a6a7
 --- /dev/null
 +++ b/hw/mips/mt7628_evb.c
 @@ -0,0 +1,157 @@
@@ -408,7 +405,7 @@ index 0000000000..868a6a7cb0
 +DEFINE_MACHINE("mt7628_evb", mt7628_evb_machine_init)
 diff --git a/include/hw/mips/mt7628.h b/include/hw/mips/mt7628.h
 new file mode 100644
-index 0000000000..8b4c829e13
+index 0000000..8b4c829
 --- /dev/null
 +++ b/include/hw/mips/mt7628.h
 @@ -0,0 +1,89 @@
@@ -502,5 +499,5 @@ index 0000000000..8b4c829e13
 +
 +#endif
 -- 
-2.35.8
+2.41.0
 

@@ -1,22 +1,22 @@
-From fcc04ca8285cfc54d6c25404adf1dd02cb78b4a0 Mon Sep 17 00:00:00 2001
+From 8240122a374e8971dda92fbb4a2a135203cc292d Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:00:43 +0800
+Date: Sun, 27 Aug 2023 15:42:35 +0800
 Subject: [PATCH 4/7] hw: intc: add rt2880-intc
 
 ---
  hw/intc/Kconfig               |   3 +
  hw/intc/meson.build           |   1 +
- hw/intc/rt2880-intc.c         | 177 ++++++++++++++++++++++++++++++++++
- include/hw/intc/rt2880-intc.h |  39 ++++++++
- 4 files changed, 220 insertions(+)
+ hw/intc/rt2880-intc.c         | 146 ++++++++++++++++++++++++++++++++++
+ include/hw/intc/rt2880-intc.h |  36 +++++++++
+ 4 files changed, 186 insertions(+)
  create mode 100644 hw/intc/rt2880-intc.c
  create mode 100644 include/hw/intc/rt2880-intc.h
 
 diff --git a/hw/intc/Kconfig b/hw/intc/Kconfig
-index 21441d0a0c..7b20a9f618 100644
+index 97d550b..e50d0bb 100644
 --- a/hw/intc/Kconfig
 +++ b/hw/intc/Kconfig
-@@ -105,3 +105,6 @@ config LOONGARCH_PCH_MSI
+@@ -104,3 +104,6 @@ config LOONGARCH_PCH_MSI
  
  config LOONGARCH_EXTIOI
      bool
@@ -24,7 +24,7 @@ index 21441d0a0c..7b20a9f618 100644
 +config RT2880_INTC
 +    bool
 diff --git a/hw/intc/meson.build b/hw/intc/meson.build
-index ed355941d1..a687242a57 100644
+index ed35594..a687242 100644
 --- a/hw/intc/meson.build
 +++ b/hw/intc/meson.build
 @@ -73,3 +73,4 @@ specific_ss.add(when: 'CONFIG_LOONGARCH_IPI', if_true: files('loongarch_ipi.c'))
@@ -34,10 +34,10 @@ index ed355941d1..a687242a57 100644
 +specific_ss.add(when: 'CONFIG_RT2880_INTC', if_true: files('rt2880-intc.c'))
 diff --git a/hw/intc/rt2880-intc.c b/hw/intc/rt2880-intc.c
 new file mode 100644
-index 0000000000..8b53390ccc
+index 0000000..622e915
 --- /dev/null
 +++ b/hw/intc/rt2880-intc.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,146 @@
 +/*
 + * rt2880 interrupt controller device emulation
 + *
@@ -73,27 +73,8 @@ index 0000000000..8b53390ccc
 +    s->disable = 0x0;
 +}
 +
-+static void rt2880_intc_reset_line_handler(void *opaque, int irq, int level)
-+{
-+    rt2880intcState *s = opaque;
-+    if (level) {
-+        s->reset_asserted = true;
-+        rt2880_intc_reset(DEVICE(opaque));
-+    } else {
-+        s->reset_asserted = false;
-+    }
-+}
-+
-+static inline int rt2880_intc_check_reset_line(rt2880intcState *s)
-+{
-+    return !(s->reset_asserted);
-+}
-+
 +static void rt2880_intc_update(rt2880intcState *s)
 +{
-+    if (!rt2880_intc_check_reset_line(s)) {
-+        return;
-+    }
 +    int i;
 +    for (i = 0; i < 32; i++) {
 +        if (test_bit(i, (void *) &s->disable)) {
@@ -121,10 +102,6 @@ index 0000000000..8b53390ccc
 +                                 unsigned size)
 +{
 +    rt2880intcState *s = opaque;
-+    if (!rt2880_intc_check_reset_line(s)) {
-+        return 0x0;
-+    }
-+
 +    switch (offset) {
 +    case RT2880_INTC_REG_STATUS0:
 +        return s->enable;
@@ -148,11 +125,6 @@ index 0000000000..8b53390ccc
 +                              unsigned size)
 +{
 +    rt2880intcState *s = opaque;
-+    if (!rt2880_intc_check_reset_line(s)) {
-+        return;
-+    }
-+
-+
 +    switch (offset) {
 +    case RT2880_INTC_REG_TYPE:
 +        s->type = value;
@@ -184,13 +156,10 @@ index 0000000000..8b53390ccc
 +    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
 +
 +    qdev_init_gpio_in(DEVICE(dev), rt2880_intc_set_irq, 32);
-+    qdev_init_gpio_in(DEVICE(dev), rt2880_intc_reset_line_handler, 1);
 +    sysbus_init_irq(dev, &s->parent_irq);
-+    sysbus_init_irq(dev, &s->reset_line);
 +    memory_region_init_io(&s->iomem, OBJECT(s), &rt2880_intc_ops, s,
 +                          TYPE_RT2880_INTC, RT2880_INTC_REGS_MAXADDR);
 +    sysbus_init_mmio(dev, &s->iomem);
-+    s->reset_asserted = false; /* default on */
 +}
 +
 +static void rt2880_intc_class_init(ObjectClass *klass, void *data)
@@ -217,10 +186,10 @@ index 0000000000..8b53390ccc
 +type_init(rt2880_register_types);
 diff --git a/include/hw/intc/rt2880-intc.h b/include/hw/intc/rt2880-intc.h
 new file mode 100644
-index 0000000000..7de7fb5404
+index 0000000..6f4fb23
 --- /dev/null
 +++ b/include/hw/intc/rt2880-intc.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,36 @@
 +#ifndef RT2880_INTC_H
 +#define RT2880_INTC_H
 +
@@ -250,9 +219,6 @@ index 0000000000..7de7fb5404
 +    /*< public >*/
 +    MemoryRegion iomem;
 +    qemu_irq parent_irq;
-+    qemu_irq reset_line;
-+
-+    bool reset_asserted;
 +
 +    uint32_t type;
 +    uint32_t enable;
@@ -261,5 +227,5 @@ index 0000000000..7de7fb5404
 +
 +#endif
 -- 
-2.35.8
+2.41.0
 

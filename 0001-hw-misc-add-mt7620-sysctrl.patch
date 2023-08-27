@@ -1,22 +1,22 @@
-From a41b4d3139ecb3a787fc03e4eab3d21bdb13e1ea Mon Sep 17 00:00:00 2001
+From 71a86739cd231b30ef8f7167f0c4db5a295f32d2 Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 13:59:50 +0800
+Date: Sun, 27 Aug 2023 15:41:36 +0800
 Subject: [PATCH 1/7] hw: misc: add mt7620-sysctrl
 
 ---
  hw/misc/Kconfig                  |   3 +
  hw/misc/meson.build              |   2 +
- hw/misc/mt7620-sysctrl.c         | 166 +++++++++++++++++++++++++++++++
- include/hw/misc/mt7620-sysctrl.h |  59 +++++++++++
- 4 files changed, 230 insertions(+)
+ hw/misc/mt7620-sysctrl.c         | 146 +++++++++++++++++++++++++++++++
+ include/hw/misc/mt7620-sysctrl.h |  57 ++++++++++++
+ 4 files changed, 208 insertions(+)
  create mode 100644 hw/misc/mt7620-sysctrl.c
  create mode 100644 include/hw/misc/mt7620-sysctrl.h
 
 diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
-index e4c2149175..1a0e157e6d 100644
+index 6996d26..582dc62 100644
 --- a/hw/misc/Kconfig
 +++ b/hw/misc/Kconfig
-@@ -184,3 +184,6 @@ config AXP2XX_PMU
+@@ -187,3 +187,6 @@ config AXP2XX_PMU
      depends on I2C
  
  source macio/Kconfig
@@ -24,10 +24,10 @@ index e4c2149175..1a0e157e6d 100644
 +config MT7620_SYSCTRL
 +    bool
 diff --git a/hw/misc/meson.build b/hw/misc/meson.build
-index 05877f61cc..4696888688 100644
+index 892f8b9..29c77af 100644
 --- a/hw/misc/meson.build
 +++ b/hw/misc/meson.build
-@@ -131,6 +131,8 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
+@@ -132,6 +132,8 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
  
  system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
  
@@ -38,10 +38,10 @@ index 05877f61cc..4696888688 100644
  specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
 diff --git a/hw/misc/mt7620-sysctrl.c b/hw/misc/mt7620-sysctrl.c
 new file mode 100644
-index 0000000000..f2b82acd08
+index 0000000..eeb111f
 --- /dev/null
 +++ b/hw/misc/mt7620-sysctrl.c
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,146 @@
 +/*
 + * Mediatek 7620 System Control emulation
 + *
@@ -68,7 +68,6 @@ index 0000000000..f2b82acd08
 +#include "qemu/log.h"
 +#include "qemu/module.h"
 +#include "sysemu/runstate.h"
-+#include "hw/resettable.h"
 +#include "hw/misc/mt7620-sysctrl.h"
 +#include "hw/irq.h"
 +
@@ -103,19 +102,6 @@ index 0000000000..f2b82acd08
 +        DPRINTF("whole system reset\n");
 +        *reg_rst &= ~(1 << 0);
 +        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
-+    }
-+
-+    int i;
-+    for (i = 1; i < 32; i++) {
-+        if (qemu_irq_is_connected(s->reset_line[i])) {
-+            if (test_bit(i, (void *)reg_rst)) {
-+                DPRINTF("device %d enter reset state\n", i);
-+                qemu_irq_raise(s->reset_line[i]);
-+            } else {
-+                DPRINTF("device %d quit reset state\n", i);
-+                qemu_irq_lower(s->reset_line[i]);
-+            }
-+        }
 +    }
 +}
 +
@@ -179,12 +165,6 @@ index 0000000000..f2b82acd08
 +    memory_region_init_io(&s->iomem, OBJECT(s), &mt7620_sysctrl_ops, s,
 +                          TYPE_MT7620_SYSCTRL, MT7620_SYSCTRL_MEM_SIZE);
 +    sysbus_init_mmio(sbd, &s->iomem);
-+
-+    /* reset line */
-+    int i;
-+    for (i = 0; i < 32; i++) {
-+        sysbus_init_irq(sbd, &s->reset_line[i]);
-+    }
 +}
 +
 +static void mt7620_sysctrl_class_init(ObjectClass *klass, void *data)
@@ -210,10 +190,10 @@ index 0000000000..f2b82acd08
 +type_init(mt7620_sysctrl_register)
 diff --git a/include/hw/misc/mt7620-sysctrl.h b/include/hw/misc/mt7620-sysctrl.h
 new file mode 100644
-index 0000000000..275e6bf63e
+index 0000000..1b401f8
 --- /dev/null
 +++ b/include/hw/misc/mt7620-sysctrl.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,57 @@
 +/*
 + * Mediatek 7620 System Control emulation
 + *
@@ -267,12 +247,10 @@ index 0000000000..275e6bf63e
 +    SysBusDevice parent_obj;
 +    MemoryRegion iomem;
 +
-+    qemu_irq reset_line[32];
-+
 +    uint32_t regs[MT7620_SYSCTRL_REG_NUMS];
 +};
 +
 +#endif
 -- 
-2.35.8
+2.41.0
 

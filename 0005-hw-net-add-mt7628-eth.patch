@@ -1,19 +1,19 @@
-From 5d85001a7b9262823e4465ec71147f35b7ba34bc Mon Sep 17 00:00:00 2001
+From ac33af513e470cf5494820d95a4841d482bf165c Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:01:28 +0800
+Date: Sun, 27 Aug 2023 15:42:57 +0800
 Subject: [PATCH 5/7] hw: net: add mt7628-eth
 
 ---
  hw/net/Kconfig              |   3 +
  hw/net/meson.build          |   1 +
- hw/net/mt7628-eth.c         | 590 ++++++++++++++++++++++++++++++++++++
- include/hw/net/mt7628-eth.h | 117 +++++++
- 4 files changed, 711 insertions(+)
+ hw/net/mt7628-eth.c         | 584 ++++++++++++++++++++++++++++++++++++
+ include/hw/net/mt7628-eth.h | 111 +++++++
+ 4 files changed, 699 insertions(+)
  create mode 100644 hw/net/mt7628-eth.c
  create mode 100644 include/hw/net/mt7628-eth.h
 
 diff --git a/hw/net/Kconfig b/hw/net/Kconfig
-index 98e00be4f9..334677a771 100644
+index 7fcc0d7..3763837 100644
 --- a/hw/net/Kconfig
 +++ b/hw/net/Kconfig
 @@ -158,3 +158,6 @@ config CAN_CTUCANFD_PCI
@@ -24,7 +24,7 @@ index 98e00be4f9..334677a771 100644
 +config MT7628_ETH
 +    bool
 diff --git a/hw/net/meson.build b/hw/net/meson.build
-index 2632634df3..9d47d9780f 100644
+index 2632634..9d47d97 100644
 --- a/hw/net/meson.build
 +++ b/hw/net/meson.build
 @@ -29,6 +29,7 @@ system_ss.add(when: 'CONFIG_ALLWINNER_SUN8I_EMAC', if_true: files('allwinner-sun
@@ -37,10 +37,10 @@ index 2632634df3..9d47d9780f 100644
  system_ss.add(when: 'CONFIG_STELLARIS_ENET', if_true: files('stellaris_enet.c'))
 diff --git a/hw/net/mt7628-eth.c b/hw/net/mt7628-eth.c
 new file mode 100644
-index 0000000000..242e168b11
+index 0000000..2042aef
 --- /dev/null
 +++ b/hw/net/mt7628-eth.c
-@@ -0,0 +1,590 @@
+@@ -0,0 +1,584 @@
 +/*
 + * Mediatek mt7628 ethernet emulation
 + *
@@ -387,12 +387,6 @@ index 0000000000..242e168b11
 +    /* interrupt */
 +    sysbus_init_irq(sbd, &s->fe_irq);
 +    sysbus_init_irq(sbd, &s->esw_irq);
-+
-+    /* reset line */
-+    sysbus_init_irq(sbd, &s->fe_reset_line);
-+    sysbus_init_irq(sbd, &s->esw_reset_line);
-+    s->fe_reset_asserted = false;
-+    s->esw_reset_asserted = false;
 +}
 +
 +static inline uint32_t mt7628_dma_index_prev(uint32_t index, uint32_t range) {
@@ -633,10 +627,10 @@ index 0000000000..242e168b11
 +type_init(mt7628_eth_register)
 diff --git a/include/hw/net/mt7628-eth.h b/include/hw/net/mt7628-eth.h
 new file mode 100644
-index 0000000000..d66c043015
+index 0000000..22fc392
 --- /dev/null
 +++ b/include/hw/net/mt7628-eth.h
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,111 @@
 +/*
 + * Mediatek mt7628 ethernet emulation
 + *
@@ -734,12 +728,6 @@ index 0000000000..d66c043015
 +    qemu_irq fe_irq;
 +    qemu_irq esw_irq;
 +
-+    qemu_irq fe_reset_line;
-+    qemu_irq esw_reset_line;
-+
-+    bool fe_reset_asserted;
-+    bool esw_reset_asserted;
-+
 +    uint16_t phy_regs[32];
 +    uint32_t fe_regs[MT7628_FE_REG_NUMS];
 +    uint32_t esw_regs[MT7628_ESW_REG_NUMS];
@@ -755,5 +743,5 @@ index 0000000000..d66c043015
 +
 +#endif /* HW_MT7628_ETH_H */
 -- 
-2.35.8
+2.41.0
 

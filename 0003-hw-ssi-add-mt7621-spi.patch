@@ -1,19 +1,19 @@
-From 20f52faef747f2470a4628a32d739208c3b5288c Mon Sep 17 00:00:00 2001
+From 24306f006a812d85ace1bf4e62d697f73beed04c Mon Sep 17 00:00:00 2001
 From: Lu Hui <luhux76@gmail.com>
-Date: Sat, 1 Jul 2023 14:00:29 +0800
+Date: Sun, 27 Aug 2023 15:42:05 +0800
 Subject: [PATCH 3/7] hw: ssi: add mt7621-spi
 
 ---
  hw/ssi/Kconfig              |   4 +
  hw/ssi/meson.build          |   1 +
- hw/ssi/mt7621-spi.c         | 372 ++++++++++++++++++++++++++++++++++++
- include/hw/ssi/mt7621-spi.h |  75 ++++++++
- 4 files changed, 452 insertions(+)
+ hw/ssi/mt7621-spi.c         | 334 ++++++++++++++++++++++++++++++++++++
+ include/hw/ssi/mt7621-spi.h |  72 ++++++++
+ 4 files changed, 411 insertions(+)
  create mode 100644 hw/ssi/mt7621-spi.c
  create mode 100644 include/hw/ssi/mt7621-spi.h
 
 diff --git a/hw/ssi/Kconfig b/hw/ssi/Kconfig
-index 7d90a02181..59fa52dc84 100644
+index 7d90a02..59fa52d 100644
 --- a/hw/ssi/Kconfig
 +++ b/hw/ssi/Kconfig
 @@ -20,3 +20,7 @@ config XILINX_SPIPS
@@ -25,7 +25,7 @@ index 7d90a02181..59fa52dc84 100644
 +    bool
 +    select SSI
 diff --git a/hw/ssi/meson.build b/hw/ssi/meson.build
-index 0aebcdd614..4c26a1a626 100644
+index 0aebcdd..4c26a1a 100644
 --- a/hw/ssi/meson.build
 +++ b/hw/ssi/meson.build
 @@ -11,3 +11,4 @@ system_ss.add(when: 'CONFIG_XLNX_VERSAL', if_true: files('xlnx-versal-ospi.c'))
@@ -35,10 +35,10 @@ index 0aebcdd614..4c26a1a626 100644
 +system_ss.add(when: 'CONFIG_MT7621_SPI', if_true: files('mt7621-spi.c'))
 diff --git a/hw/ssi/mt7621-spi.c b/hw/ssi/mt7621-spi.c
 new file mode 100644
-index 0000000000..084a5ba721
+index 0000000..4be1ebd
 --- /dev/null
 +++ b/hw/ssi/mt7621-spi.c
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,334 @@
 +/*
 + * Mediatek 7621 spi master emulation
 + *
@@ -83,27 +83,6 @@ index 0000000000..084a5ba721
 +#endif
 +
 +#define REG_INDEX(offset)   (offset / sizeof(uint32_t))
-+
-+static void mt7621_spi_reset(DeviceState *ds);
-+
-+static void mt7621_spi_reset_line_handler(void *opaque, int irq, int level)
-+{
-+    mt7621SpiState *s = opaque;
-+    if (level) {
-+        DPRINTF("device enter reset state\n");
-+        s->reset_asserted = true;
-+        mt7621_spi_reset(DEVICE(opaque));
-+    } else {
-+        DPRINTF("device quit reset state\n");
-+        s->reset_asserted = false;
-+    }
-+}
-+
-+static inline int mt7621_spi_check_reset_line(mt7621SpiState *s)
-+{
-+    return !(s->reset_asserted);
-+}
-+
 +
 +inline static void mt7621_spi_cs_update(mt7621SpiState *s)
 +{
@@ -243,10 +222,6 @@ index 0000000000..084a5ba721
 +static uint64_t mt7621_spi_read(void *opaque, hwaddr addr, unsigned int size)
 +{
 +    mt7621SpiState *s = (mt7621SpiState *)opaque;
-+    if (!mt7621_spi_check_reset_line(s)) {
-+        return 0x0;
-+    }
-+
 +    if (addr >= MT7621_SPI_MEM_SIZE) {
 +        qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
 +                      __func__, (uint32_t)addr);
@@ -260,10 +235,6 @@ index 0000000000..084a5ba721
 +                             uint64_t value, unsigned int size)
 +{
 +    mt7621SpiState *s = (mt7621SpiState *)opaque;
-+    if (!mt7621_spi_check_reset_line(s)) {
-+        return;
-+    }
-+
 +    if (addr >= MT7621_SPI_MEM_SIZE) {
 +        qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
 +                      __func__, (uint32_t)addr);
@@ -294,11 +265,6 @@ index 0000000000..084a5ba721
 +
 +    struct mt7621SpiFlash *flash = opaque;
 +    mt7621SpiState *s = flash->spi;
-+    if (!mt7621_spi_check_reset_line(s)) {
-+        return 0x0;
-+    }
-+
-+
 +    if (mt7621_spi_can_xfer(s)) {
 +        mt7621_spi_set_busy(s);
 +    } else {
@@ -316,7 +282,7 @@ index 0000000000..084a5ba721
 +    ssi_transfer(s->spi, extract32(addr, 8, 8));
 +    ssi_transfer(s->spi, extract32(addr, 0, 8));
 +
-+    uint64_t val;
++    uint64_t val = 0;
 +    /* recv data from flash */
 +    int i;
 +    for (i = 0; i < size; i++) {
@@ -329,15 +295,14 @@ index 0000000000..084a5ba721
 +
 +    mt7621_spi_clear_busy(s);
 +
++    DPRINTF("flash read addr %08lx size %02x value %08lx\n",
++            addr, size, val);
 +    return val;
 +}
 +
 +static void mt7621_spi_flash_write(void *opaque, hwaddr addr, uint64_t v,
 +                                   unsigned int size)
 +{
-+    if (!mt7621_spi_check_reset_line(MT7621_SPI(opaque))) {
-+        return;
-+    }
 +    (void) opaque;
 +    (void) addr;
 +    (void) v;
@@ -384,10 +349,7 @@ index 0000000000..084a5ba721
 +                          "flash-direct", MT7621_SPI_SPACE_SIZE);
 +    sysbus_init_mmio(sbd, &flash->direct_access);
 +
-+    qdev_init_gpio_in(DEVICE(dev), mt7621_spi_reset_line_handler, 1);
 +    sysbus_init_irq(sbd, &s->cs_line);
-+    sysbus_init_irq(sbd, &s->reset_line);
-+    s->reset_asserted = false;
 +}
 +
 +static void mt7621_spi_class_init(ObjectClass *klass, void *data)
@@ -413,10 +375,10 @@ index 0000000000..084a5ba721
 +type_init(mt7621_spi_register_types)
 diff --git a/include/hw/ssi/mt7621-spi.h b/include/hw/ssi/mt7621-spi.h
 new file mode 100644
-index 0000000000..6f6d8450c5
+index 0000000..e647cdb
 --- /dev/null
 +++ b/include/hw/ssi/mt7621-spi.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,72 @@
 +/*
 + * Mediatek 7621 spi master emulation
 + *
@@ -481,9 +443,6 @@ index 0000000000..6f6d8450c5
 +    SSIBus *spi;
 +
 +    qemu_irq cs_line;
-+    qemu_irq reset_line;
-+
-+    bool reset_asserted;
 +
 +    uint32_t regs[MT7621_SPI_REG_NUMS];
 +
@@ -493,5 +452,5 @@ index 0000000000..6f6d8450c5
 +
 +#endif
 -- 
-2.35.8
+2.41.0
 
